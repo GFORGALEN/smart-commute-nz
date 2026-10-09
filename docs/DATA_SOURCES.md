@@ -21,6 +21,10 @@ Manual Mode uses user supplied distances, durations, fuel parameters, fares, tol
 
 Google data, if activated, comes from the official Maps JavaScript Routes library and Places (New). Distance is returned in metres and duration in milliseconds, converted to km/minutes by the adapter. Transit fare is used only if Google returns a complete NZD fare; otherwise the live transit request is rejected and manual pricing is needed. See [Google integration and costs](GOOGLE_MAPS.md).
 
+Automated Google provider tests use injected fixtures and make no paid calls. A separate authorized local live check on **9 October 2026**, limited to an Auckland scenario, verified map loading, three real driving alternatives, Places predictions/selected-place coordinates including widget keyboard selection, and geocoding. The transit SDK returned six alternatives, each with an empty fare currency code, so the app correctly rejected the incomplete prices and kept manual fallback. These results do not verify fare availability or schedule accuracy for other journeys. Google only supplies a transit fare when it has fare information for all transit steps; see [the official fare property](https://developers.google.com/maps/documentation/javascript/reference/route#RouteTravelAdvisory.transitFare).
+
+The public GitHub Pages build receives an owner-authorized browser key from the GitHub Actions repository secret `VITE_GOOGLE_MAPS_API_KEY` at the final deployment build. Google requests require explicit user activation, and Manual Mode remains usable. The deployment key is absent from committed source and automated test builds, but is visible to visitors in the static frontend. The local `.env.local` and live responses are not bundled as example data.
+
 AT fares use the official [2026 fare-change tables](https://at.govt.nz/bus-train-ferry/fares-and-discounts/public-transport-fare-changes), effective **1 February 2026**, source updated **13 August 2026**. The following HOP amounts are one-way integrated bus/train journeys, indexed by zone count; 4+ zones use the fourth entry:
 
 | Passenger                                                | 1 zone | 2 zones | 3 zones | 4+ zones |

@@ -12,6 +12,10 @@ VITE_GOOGLE_MAPS_API_KEY=your_restricted_browser_key
 
 Vite exposes this value to browsers. It is not a secret. Restrict it to your local/deployment HTTP referrers and the APIs you actually use. The account owner must review costs and explicitly choose whether to configure billing and enable Maps JavaScript API, Routes API, Places API (New), and optionally Geocoding API. Never send a key in chat or commit it. See [Google's API security guidance](https://developers.google.com/maps/api-security-best-practices).
 
+The public GitHub Pages build uses an owner-authorized browser key supplied through the GitHub Actions repository secret `VITE_GOOGLE_MAPS_API_KEY` during the final deployment build. The local `.env.local` stays ignored by Git, and the key is not committed to source. A static frontend necessarily exposes its browser key to site visitors, even when the build input is a secret. Restrict the key to the deployed and authorized local referrers. Google features require explicit user activation; Manual Mode remains available.
+
+Automated checks and their production test build explicitly use an empty `VITE_GOOGLE_MAPS_API_KEY`, making no paid Google requests. The final deployment build receives the authorized key only after those checks pass on `main`; pull request builds do not receive it. When running checks locally, set the variable to an empty string first so a key in `.env.local` does not change test behavior.
+
 ## Current SDK and request behavior
 
 The adapter uses `setOptions` / `importLibrary` from [Google's current JavaScript loader](https://github.com/googlemaps/js-api-loader), `google.maps.routes.Route.computeRoutes`, and `PlaceAutocompleteElement` with `gmp-select`. It does not use legacy DirectionsService or the old autocomplete widget. Address selection requests only `formattedAddress` and `location`; predictions are managed by the Google widget. Field masks limit route results to the distance, duration, geometry, transit steps, warnings and available fare needed by the planner. See the [Routes reference](https://developers.google.com/maps/documentation/javascript/reference/route) and [new Places widget guide](https://developers.google.com/maps/documentation/javascript/place-autocomplete-new).
@@ -47,4 +51,12 @@ The adapter stores responses only in active session memory and clears them on di
 
 ## Validation limits
 
-Unit tests inject a deterministic SDK loader, cover failure/missing keys, outbound and return separation, transit fares and transfers, and make zero paid requests. Live API coverage, key restrictions, billing account status, specific transit schedules and map rendering need verification by an account owner with an authorized key. Manual Mode remains usable when initialization, authorization, quota or routing fails.
+Automated unit tests inject a deterministic SDK loader and make zero paid requests. They cover failure/missing keys, SDK field validation and error codes, outbound and return separation, transit fares and transfers. Fixture responses are test data, not live measurements.
+
+A separate, bounded live check with an account-owner-authorized local key on **9 October 2026** verified one limited Auckland scenario:
+
+- The Google map loaded, and the app displayed three real driving alternatives.
+- Places returned five address predictions and selected-place coordinates. Keyboard selection in the actual `PlaceAutocompleteElement` widget also returned coordinates. Geocoding succeeded.
+- The transit SDK returned six route alternatives, but every returned fare object had an empty `currencyCode`. The app rejected these as an incomplete NZD fare and retained Manual Mode; it did not assign a zero fare.
+
+These live calls were separate from automated tests and may generate billable events. This check does not establish coverage for other routes, schedules, keys or deployment referrers. Google provides a transit fare only when it has fare information for every transit step; see [the official fare property](https://developers.google.com/maps/documentation/javascript/reference/route#RouteTravelAdvisory.transitFare). Use verified AT zones and eligibility or a manually supplied fare when Google cannot provide a complete price. Manual Mode remains usable when initialization, authorization, quota or routing fails.

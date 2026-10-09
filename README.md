@@ -78,8 +78,15 @@ A Vite environment value is visible to site visitors; it is not a secret. Restri
 HTTP referrers and APIs, set quotas and billing alerts. No-key manual mode is default.
 Map initialization, Places and route lookup are explicit actions. Never enable
 billing or purchase a service without the account owner's consent. No paid service
-was enabled to build or test this release. Live routes need an enabled, authorized
-Google account and were not verified against a paid key in this release.
+was enabled by this project. A limited, owner-authorized live check on 9 October 2026
+verified map loading, driving alternatives, address search and geocoding. Transit
+returned routes but incomplete NZD fare information, so the app requires manual
+pricing or verified AT estimates. Broader coverage, traffic-aware routing and return
+alternatives still need live verification. The public demo uses an owner-authorized
+browser key supplied through the GitHub Actions repository secret
+`VITE_GOOGLE_MAPS_API_KEY` during the final deployment build; the local `.env.local`
+is not committed. Browser users can inspect the built key, so Google Cloud referrer/API
+restrictions remain necessary. Google features require explicit user activation.
 
 ## Reuse as a component or widget
 
@@ -164,9 +171,12 @@ npm run test:e2e
 ```
 
 The CI also tests the production build under its Pages subpath, including offline
-reloads and standalone widget embedding. To reproduce on PowerShell:
+reloads and standalone widget embedding. Automated checks explicitly use an empty
+Google key, so they make no paid Google requests. To reproduce on PowerShell when
+you have a local key configured:
 
 ```powershell
+$env:VITE_GOOGLE_MAPS_API_KEY=''
 $env:VITE_BASE_PATH='/smart-commute-nz/'
 npm run build
 $env:PLAYWRIGHT_PRODUCTION='1'
@@ -182,7 +192,9 @@ React and browser tests exercise actual inputs and recommendations. See
 ## GitHub Pages
 
 The workflow runs lint, types, unit/component tests, build and desktop/mobile E2E,
-then deploys only successful `main` builds. In GitHub **Settings → Pages**, select
+with an empty Google key. After these checks pass, the final Pages build receives the
+deployment browser key from the `VITE_GOOGLE_MAPS_API_KEY` repository secret. The workflow deploys
+only successful `main` builds. In GitHub **Settings → Pages**, select
 **GitHub Actions**. Public GitHub Pages is the intended static host.
 
 The CI sets `VITE_BASE_PATH=/smart-commute-nz/` for the repository subpath. If you

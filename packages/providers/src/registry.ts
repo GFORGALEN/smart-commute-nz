@@ -57,8 +57,8 @@ export const DATA_SOURCES: readonly DataSource[] = [
     commercialUse: 'subject-to-terms',
     redistribution: 'restricted',
     limitations: [
-      'No production key was used to validate live coverage.',
-      'Fare may be absent; missing fare requires manual input.',
+      'Limited Auckland live checks on 2026-10-09 verified maps, driving, address search and geocoding; wider coverage remains unverified.',
+      'Fare may be absent or incomplete; missing NZD fare requires manual input.',
       'Only transient session memory; no localStorage/API response caching.',
       'Draw Google routes on a Google map and preserve attribution.',
     ],

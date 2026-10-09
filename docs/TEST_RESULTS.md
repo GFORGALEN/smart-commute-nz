@@ -2,14 +2,15 @@
 
 Release: **0.1.0**. Verified locally on **9 October 2026** on Windows with
 Node.js 24.15.0, npm 11.12.0 and Playwright 1.64.0 Chromium. No real Google API
-key or paid API request was used.
+key or paid API request was used in automated checks. A separate, authorized
+live follow-up is described below.
 
 | Check                                       | Result                                                     |
 | ------------------------------------------- | ---------------------------------------------------------- |
 | `npm run format:check`                      | Passed                                                     |
 | `npm run lint`                              | Passed, no warnings                                        |
 | `npm run typecheck`                         | Passed, strict TypeScript                                  |
-| `npm run test`                              | **113 passed** across four files                           |
+| `npm run test`                              | **125 passed** across four files                           |
 | Production app and independent widget build | Passed with `/smart-commute-nz/` base                      |
 | Development Playwright                      | **20 passed**, four production-only cases skipped          |
 | Production Playwright                       | **24 passed**, no skipped cases                            |
@@ -24,9 +25,10 @@ simultaneous independent widgets, including uniqueness of document element IDs.
 - **39 core tests:** fuel formula, zero and invalid inputs, separate outward/return
   legs, parking once, fares, tolls, maintenance, changing prices/consumption,
   weekly/monthly projections, time value and deterministic ranking.
-- **27 provider tests:** current SDK request shapes via injected test fixtures,
+- **39 provider tests:** current SDK request shapes via injected test fixtures,
   missing keys, quota and API errors, separate return requests, transit fare
-  completeness, manual input validation and dated AT fare rules.
+  completeness, top-level SDK field masks, structured SDK/RPC error handling,
+  sanitized error messages, manual input validation and dated AT fare rules.
 - **25 planner tests:** editable costs, persistence, callback/host props, bilingual
   UI, Google failure/attribution, transient Google data, stale async query rejection,
   incomplete returns, stale AT fare exclusion, manual fare recovery and parking
@@ -45,6 +47,13 @@ the production build. No failing test was removed to obtain these results.
 
 ## Reproduce
 
+Set `VITE_GOOGLE_MAPS_API_KEY` to an empty string before automated checks if a
+local `.env.local` contains a real key. PowerShell:
+
+```powershell
+$env:VITE_GOOGLE_MAPS_API_KEY=''
+```
+
 ```sh
 npm ci
 npx playwright install chromium
@@ -58,23 +67,49 @@ npm run test:e2e
 Then test the production deployment subpath on PowerShell:
 
 ```powershell
+$env:VITE_GOOGLE_MAPS_API_KEY=''
 $env:VITE_BASE_PATH='/smart-commute-nz/'
 npm run build
 $env:PLAYWRIGHT_PRODUCTION='1'
 npm run test:e2e
 ```
 
-On a POSIX shell, set the same environment variables before the commands. CI
-performs both browser passes and deploys only a successful `main` build. See the
+On a POSIX shell, use `export VITE_GOOGLE_MAPS_API_KEY=''` and set the other
+environment variables before the commands. CI performs both browser passes with
+an empty key. After checks pass on `main`, the final deployment build receives the
+authorized browser key from the `VITE_GOOGLE_MAPS_API_KEY` GitHub Actions repository
+secret. Pull request builds do not receive it. Deployment requires a successful
+`main` build.
+See the
 [GitHub Actions runs](https://github.com/GFORGALEN/smart-commute-nz/actions).
+
+## Bounded live follow-up
+
+On **9 October 2026**, an account-owner-authorized local key was used for a small
+Auckland scenario. The map loaded, and the app returned **three driving alternatives**.
+Places returned **five address suggestions** and selected-place coordinates; keyboard
+selection in the actual autocomplete widget also returned coordinates. Address
+geocoding succeeded.
+
+The transit SDK returned **six route alternatives**, but each fare object had an
+empty currency code. The app rejected the incomplete NZD prices and required manual
+pricing or verified AT estimates. It did not treat missing fares as free travel.
+Google supplies a transit fare only when it knows fares for every transit step; see
+[the official fare property](https://developers.google.com/maps/documentation/javascript/reference/route#RouteTravelAdvisory.transitFare).
+
+These limited live calls were separate from automated tests and may produce billable
+events. They do not establish availability for other journeys, schedules or deployment
+referrers. Traffic-aware driving and Google return alternatives were not live tested.
+No live response was bundled as sample input, and the local key was not committed.
 
 ## Practical limits
 
 The browser projects use Chromium desktop and a Pixel 7 mobile profile. Safari,
 Firefox, physical devices and screen-reader compatibility have not been certified.
-Google mocks are test fixtures and never appear as product route data. Real Google
-coverage, map rendering, API-key restrictions and billing configuration still need
-an authorized account owner's live verification.
+Google mocks are test fixtures and never appear as product route data. Live Google
+verification is limited to the Auckland scenario above. Wider routing coverage,
+deployment-specific referrer restrictions and ongoing billing configuration require
+the account owner's review.
 
 The AT table is a dated static estimate, not an AT Mobile feed. Verified zones,
 actual transfer conditions and eligibility remain user inputs. Quote verification

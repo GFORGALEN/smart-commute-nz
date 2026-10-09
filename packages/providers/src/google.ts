@@ -89,20 +89,47 @@ function locationValue(location: Location): string | google.maps.LatLngLiteral {
 
 function readableError(error: unknown): RouteProviderError {
   if (error instanceof RouteProviderError) return error;
-  const raw = error instanceof Error ? error.message : String(error);
-  if (/quota|resource.exhausted|over.query.limit|429/i.test(raw)) {
+  // MapsNetworkError exposes a code independently of its human-readable message.
+  // Read it structurally because SDK errors may originate in another realm.
+  const details =
+    typeof error === 'object' && error !== null
+      ? (error as { code?: unknown; message?: unknown; name?: unknown })
+      : undefined;
+  const code = typeof details?.code === 'string' ? details.code.toUpperCase() : '';
+  const raw =
+    typeof details?.message === 'string'
+      ? details.message
+      : error instanceof Error
+        ? error.message
+        : String(error);
+  if (
+    ['RESOURCE_EXHAUSTED', 'OVER_QUERY_LIMIT', 'OVER_DAILY_LIMIT'].includes(code) ||
+    /quota|resource.exhausted|over.query.limit|429/i.test(raw)
+  ) {
     return new RouteProviderError(
       'QUOTA_EXCEEDED',
       'Google quota was reached. Continue with Manual Mode or check the project quota.',
     );
   }
-  if (/denied|invalid.key|not.authorized|billing|403|api.key/i.test(raw)) {
+  if (
+    ['UNAUTHENTICATED', 'PERMISSION_DENIED', 'REQUEST_DENIED'].includes(code) ||
+    /denied|unauthenticated|invalid.key|not.authorized|billing|403|api.key/i.test(raw)
+  ) {
     return new RouteProviderError(
       'REQUEST_DENIED',
       'Google rejected the request. Check key restrictions, enabled APIs and the account configuration. Manual Mode remains available.',
     );
   }
-  if (/zero.results|not.found|no.route/i.test(raw))
+  if (
+    details?.name === 'InvalidValueError' ||
+    ['INVALID_ARGUMENT', 'INVALID_REQUEST', 'OUT_OF_RANGE'].includes(code) ||
+    /invalid.argument|invalid.request|out.of.range/i.test(raw)
+  )
+    return new RouteProviderError(
+      'INVALID_INPUT',
+      'Google rejected the route inputs or SDK request fields. Check addresses, coordinates and departure times. If those are valid, the Google adapter may need an update; Manual Mode remains available.',
+    );
+  if (['ZERO_RESULTS', 'NOT_FOUND'].includes(code) || /zero.results|not.found|no.route/i.test(raw))
     return new RouteProviderError(
       'NO_ROUTES',
       'Google returned no route for these locations and this time.',
@@ -223,8 +250,8 @@ export class GoogleRouteProvider implements RouteProvider {
     const errorListener = () =>
       onError?.(
         new RouteProviderError(
-          'NETWORK_ERROR',
-          'Address search failed. Enter the address manually.',
+          'REQUEST_DENIED',
+          'Google denied address search. Check that Places API (New) is enabled and allowed by the key restrictions. Enter the address manually.',
         ),
       );
     widget.addEventListener('gmp-select', listener);
@@ -414,7 +441,6 @@ export class GoogleRouteProvider implements RouteProvider {
           'viewport',
           'legs',
           'warnings',
-          'travelAdvisory.transitFare',
         ],
         computeAlternativeRoutes: waypoints.length === 0,
         language: 'en',
@@ -422,7 +448,12 @@ export class GoogleRouteProvider implements RouteProvider {
       };
       if (request.mode === 'drive')
         base.routingPreference = this.options.trafficAware ? 'TRAFFIC_AWARE' : 'TRAFFIC_UNAWARE';
-      else base.transitPreference = { allowedTransitModes: ['BUS', 'RAIL'] };
+      else {
+        // The JavaScript Route SDK accepts Route property names here. Its field
+        // validation rejects the REST-style nested travelAdvisory.transitFare mask.
+        base.fields.push('travelAdvisory');
+        base.transitPreference = { allowedTransitModes: ['BUS', 'RAIL'] };
+      }
       if (waypoints.length)
         base.intermediates = waypoints.map((location) => ({ location: locationValue(location) }));
       const timeAware = request.mode === 'transit' || this.options.trafficAware === true;

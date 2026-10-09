@@ -168,6 +168,124 @@ describe('Google adapter without external paid requests', () => {
       expect(provider.getMetrics().routeRequests).toBe(1);
     }
   });
+  it.each([
+    ['UNAUTHENTICATED', 'REQUEST_DENIED', 'key restrictions'],
+    ['PERMISSION_DENIED', 'REQUEST_DENIED', 'enabled APIs'],
+    ['RESOURCE_EXHAUSTED', 'QUOTA_EXCEEDED', 'quota'],
+    ['INVALID_ARGUMENT', 'INVALID_INPUT', 'route inputs'],
+    ['OUT_OF_RANGE', 'INVALID_INPUT', 'departure times'],
+    ['NOT_FOUND', 'NO_ROUTES', 'no route'],
+    ['ZERO_RESULTS', 'NO_ROUTES', 'no route'],
+    ['UNAVAILABLE', 'NETWORK_ERROR', 'connectivity'],
+  ])(
+    'classifies SDK code %s even when the error message is generic',
+    async (sdkCode, code, text) => {
+      const { provider, computeRoutes } = mockGoogle([]);
+      computeRoutes.mockRejectedValue(
+        Object.assign(new Error('The SDK request failed.'), { code: sdkCode }),
+      );
+      await expect(provider.getRoutes(request)).rejects.toMatchObject({
+        name: 'RouteProviderError',
+        code,
+        message: expect.stringContaining(text),
+      });
+      expect(provider.getMetrics()).toMatchObject({
+        routeRequests: 1,
+        routeErrors: 1,
+        lastError: code,
+      });
+    },
+  );
+  it('recognizes structured SDK errors without relying on Error instanceof', async () => {
+    const { provider, computeRoutes } = mockGoogle([]);
+    computeRoutes.mockRejectedValue({ code: 'UNAUTHENTICATED', message: 'Request failed.' });
+    await expect(provider.getRoutes(request)).rejects.toMatchObject({ code: 'REQUEST_DENIED' });
+  });
+  it('classifies SDK field validation failures without exposing raw URLs or credentials', async () => {
+    const { provider, computeRoutes } = mockGoogle([]);
+    computeRoutes.mockRejectedValue(
+      Object.assign(
+        new Error(
+          'in property fields: contains invalid fields: travelAdvisory.transitFare https://example.test/?key=DO_NOT_DISPLAY',
+        ),
+        { name: 'InvalidValueError' },
+      ),
+    );
+    const error = await provider.getRoutes(request).catch((failure: unknown) => failure);
+    expect(error).toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('SDK request fields'),
+    });
+    expect((error as Error).message).not.toContain('https://');
+    expect((error as Error).message).not.toContain('DO_NOT_DISPLAY');
+  });
+  it('uses supported SDK Route field masks and requests transit advisory only for transit', async () => {
+    const supportedFields = new Set([
+      'description',
+      'distanceMeters',
+      'durationMillis',
+      'path',
+      'viewport',
+      'legs',
+      'warnings',
+      'travelAdvisory',
+    ]);
+    const computeRoutes = vi.fn(async (input: GoogleComputeRequest) => {
+      if (input.fields.some((field) => !supportedFields.has(field)))
+        throw Object.assign(new Error('in property fields: contains invalid fields'), {
+          name: 'InvalidValueError',
+        });
+      const transit: GoogleRouteData = {
+        distanceMeters: 1000,
+        durationMillis: 600000,
+        legs: [
+          {
+            steps: [
+              {
+                travelMode: 'TRANSIT',
+                staticDurationMillis: 600000,
+                transitDetails: { transitLine: { vehicle: { vehicleType: 'BUS' } } },
+              },
+            ],
+          },
+        ],
+        travelAdvisory: { transitFare: { currencyCode: 'NZD', units: 3 } },
+      };
+      return { routes: [input.travelMode === 'TRANSIT' ? transit : drive(1000)] };
+    });
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Route: { computeRoutes } }),
+    });
+    expect((await provider.getRoutes(request)).routes).toHaveLength(1);
+    const transit = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(transit.routes[0]?.outbound[0]?.fare).toBe(3);
+    expect(computeRoutes.mock.calls[0]?.[0].fields).not.toContain('travelAdvisory');
+    expect(computeRoutes.mock.calls[1]?.[0].fields).toContain('travelAdvisory');
+  });
+  it('reports the autocomplete backend-denial event and removes its handler on cleanup', async () => {
+    const widget = document.createElement('div');
+    const onError = vi.fn();
+    const loadLibrary = vi.fn().mockResolvedValue({
+      PlaceAutocompleteElement: vi.fn(function () {
+        return widget;
+      }),
+    });
+    const provider = new GoogleRouteProvider({ apiKey: 'test-key', loadLibrary });
+    const container = document.createElement('div');
+    const cleanup = await provider.attachAutocomplete(container, vi.fn(), onError);
+    widget.dispatchEvent(new Event('gmp-error'));
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      code: 'REQUEST_DENIED',
+      message: expect.stringContaining('Places API (New)'),
+    });
+    expect(provider.getMetrics().routeRequests).toBe(0);
+    cleanup();
+    widget.dispatchEvent(new Event('gmp-error'));
+    expect(onError).toHaveBeenCalledOnce();
+    expect(container.childElementCount).toBe(0);
+  });
   it('models walking and waiting, assigns one complete fare, and counts transfers', async () => {
     const { provider } = mockGoogle([
       [
