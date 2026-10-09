@@ -186,7 +186,7 @@ test('Chinese navigation and planner labels follow the language selection', asyn
     page.getByRole('tablist').getByRole('tab', { name: '方案比较', exact: true }),
   ).toBeVisible();
   await expect(
-    page.locator('.sc-map-toolbar').getByText('手动模式', { exact: true }),
+    page.locator('.sc-map-toolbar').getByText('一眼看懂你的行程', { exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole('tablist').getByRole('tab', { name: '路线规划', exact: true }),

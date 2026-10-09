@@ -473,6 +473,7 @@ export class GoogleRouteProvider implements RouteProvider {
       const map = new maps.Map(element, {
         center: { lat: -36.8485, lng: 174.7633 },
         zoom: 11,
+        maxZoom: 15,
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: true,
@@ -671,7 +672,16 @@ export class GoogleRouteProvider implements RouteProvider {
       route.createPolylines?.({ polylineOptions: { strokeColor: '#166a5b', strokeWeight: 5 } }) ??
       [];
     for (const polyline of this.polylines) polyline.setMap(this.map);
-    if (route.viewport) this.map.fitBounds(route.viewport);
+    if (route.viewport) {
+      const map = this.map;
+      const listener = map.addListener('idle', () => {
+        listener.remove();
+        if (this.map !== map) return;
+        const zoom = map.getZoom?.();
+        if (zoom !== undefined && zoom > 15) map.setZoom?.(15);
+      });
+      map.fitBounds(route.viewport, { top: 48, right: 48, bottom: 48, left: 48 });
+    }
   }
 
   dispose(): void {

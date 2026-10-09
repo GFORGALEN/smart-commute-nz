@@ -3001,3 +3001,222 @@
     padding: 12px;
   }
 }
+
+/* Keep the journey and its choices together while the map stays in view. */
+@media (min-width: 761px) {
+  .sc-workspace {
+    grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
+    gap: 18px 24px;
+  }
+  .sc-input-panel {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .sc-input-content {
+    max-height: none;
+    overflow: visible;
+  }
+  .sc-results-panel {
+    grid-column: 1;
+    grid-row: 2;
+    display: block;
+  }
+  .sc-map-panel {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    position: sticky;
+    top: 18px;
+    align-self: start;
+    min-height: 480px;
+    height: min(760px, calc(100dvh - 36px));
+  }
+  .sc-map-stage {
+    min-height: 0;
+    height: auto;
+  }
+  .sc-results-heading,
+  .sc-results-link,
+  .sc-recommendation,
+  .sc-projection,
+  .sc-result-card:last-of-type {
+    grid-column: auto;
+  }
+  .sc-results-heading {
+    margin-top: 0;
+  }
+}
+
+.sc-advanced-inputs {
+  margin-top: 18px;
+  border: 1px solid var(--sc-line);
+  border-radius: 10px;
+  background: var(--sc-soft);
+}
+.sc-advanced-inputs > summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--sc-teal);
+  cursor: pointer;
+  list-style: none;
+}
+.sc-advanced-inputs > summary::-webkit-details-marker {
+  display: none;
+}
+.sc-advanced-inputs > summary svg:last-child {
+  margin-left: auto;
+  transition: transform 0.2s;
+}
+.sc-advanced-inputs[open] > summary svg:last-child {
+  transform: rotate(180deg);
+}
+.sc-advanced-content {
+  padding: 0 14px 16px;
+}
+.sc-advanced-content > .sc-section-title {
+  margin-top: 8px;
+}
+.sc-result-stops {
+  display: block;
+  margin-top: 4px;
+  color: var(--sc-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.sc-live-step {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--sc-line);
+  font-size: 12px;
+}
+.sc-live-step > span {
+  color: var(--sc-muted);
+}
+.sc-live-step > strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.sc-timezone-warning {
+  padding: 8px 10px;
+  border: 1px solid #e5d9b6;
+  border-radius: 7px;
+  background: #fff9e9;
+  color: #71572e;
+}
+.sc-theme-dark .sc-timezone-warning {
+  border-color: #655636;
+  background: #3e3828;
+  color: #e6d3a4;
+}
+.sc-show-routes {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 10px;
+  margin: 3px 0 14px;
+  border: 1px solid var(--sc-line) !important;
+  border-radius: 10px;
+  background: var(--sc-surface);
+  color: var(--sc-teal) !important;
+  font-size: 12px;
+  font-weight: 650;
+}
+.sc-show-routes[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+.sc-result-card {
+  margin-bottom: 10px;
+}
+.sc-result-top strong {
+  font-size: 14px;
+}
+.sc-result-source,
+.sc-result-warning,
+.sc-result-meta,
+.sc-results-heading p,
+.sc-projection p {
+  font-size: 11px;
+}
+.sc-badge {
+  font-size: 10px;
+}
+.sc-result-warning {
+  color: var(--sc-muted);
+}
+.sc-planner-intro {
+  padding-bottom: 20px;
+}
+.sc-advanced-inputs .sc-icon-button,
+.sc-location-row > .sc-icon-button {
+  width: 36px;
+  height: 36px;
+}
+
+@media (max-width: 760px) {
+  .sc-workspace {
+    gap: 15px;
+  }
+  .sc-input-panel {
+    order: 0;
+  }
+  .sc-map-panel {
+    order: 1;
+  }
+  .sc-results-panel {
+    order: 2;
+  }
+  .sc-mobile-input-toggle {
+    min-height: 48px;
+    font-size: 14px;
+  }
+  .sc-input-content {
+    padding-top: 0;
+  }
+  .sc-input-content .sc-panel-heading {
+    display: none;
+  }
+  .sc-map-stage {
+    height: 320px;
+    min-height: 320px;
+  }
+  .sc-planner-intro {
+    padding: 17px 18px 16px;
+  }
+  .sc-planner-intro h1 {
+    font-size: 23px;
+  }
+  .sc-navigation {
+    scrollbar-width: thin;
+  }
+  .sc-result-top strong {
+    font-size: 14px;
+  }
+  .sc-result-source,
+  .sc-result-warning,
+  .sc-result-meta {
+    font-size: 11px;
+  }
+  .sc-result-card {
+    padding: 14px;
+  }
+  .sc-result-card.is-selected {
+    padding: 13.5px;
+  }
+  .sc-show-routes {
+    font-size: 13px;
+  }
+  .sc-location-row > .sc-icon-button {
+    width: 40px;
+    height: 40px;
+  }
+}

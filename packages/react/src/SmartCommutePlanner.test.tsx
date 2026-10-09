@@ -973,6 +973,7 @@ describe('Google transit fare ranges', () => {
     expect(google.renderRoute).toHaveBeenLastCalledWith('google-transit-range');
     expect(google.initializeMap.mock.calls[0]![0].isConnected).toBe(true);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Adjust fares and costs'));
     const editor = screen.getByTestId('route-editor-google-transit-range');
     expect(
       within(editor).getByText(
