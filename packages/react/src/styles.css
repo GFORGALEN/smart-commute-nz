@@ -733,6 +733,80 @@
 .sc-waypoints {
   margin: 17px 0 3px;
 }
+.sc-stopovers {
+  margin-top: 15px;
+  padding: 12px;
+  border: 1px solid var(--sc-line);
+  border-radius: 10px;
+  background: var(--sc-soft);
+}
+.sc-stopover-heading,
+.sc-stopover-search-actions,
+.sc-stopover-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.sc-stopover-heading {
+  justify-content: space-between;
+}
+.sc-stopover-heading h3 {
+  margin: 0;
+  font-size: 12px;
+}
+.sc-stopover-heading > span {
+  color: var(--sc-muted);
+  font-size: 10px;
+}
+.sc-stopover-list {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0;
+}
+.sc-stopover-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--sc-line);
+}
+.sc-stopover-number {
+  display: grid;
+  place-items: center;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  border-radius: 50%;
+  background: var(--sc-teal);
+  color: white;
+  font-size: 11px;
+}
+.sc-stopover-label {
+  flex: 1;
+  min-width: 90px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.sc-stopover-controls {
+  margin-left: auto;
+}
+.sc-stopover-controls .sc-icon-button {
+  width: 27px;
+  height: 27px;
+}
+.sc-stopover-search-actions {
+  margin-top: 8px;
+}
+.sc-at-fare-link {
+  padding-top: 10px;
+  font-size: 11px;
+}
+.sc-at-fare-link a {
+  color: var(--sc-teal);
+  text-decoration: underline;
+}
 .sc-waypoints h4 {
   font-size: 10px;
   font-weight: 650;
@@ -791,13 +865,39 @@
   overflow: hidden;
 }
 .sc-map-toolbar {
-  height: 56px;
+  min-height: 56px;
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 18px;
+  padding: 10px 18px;
   border-bottom: 1px solid var(--sc-line);
+}
+.sc-map-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.sc-map-tools .sc-small-button {
+  padding: 7px 9px;
+  font-size: 10px;
+}
+.sc-map-stopover-prompt {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 1;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--sc-teal);
+  color: white;
+  font-size: 12px;
+  pointer-events: none;
 }
 .sc-map-toolbar > span:first-child {
   display: flex;
@@ -2022,7 +2122,7 @@
     font-size: 25px;
   }
   .sc-map-toolbar {
-    padding: 0 13px;
+    padding: 10px 13px;
   }
   .sc-map-toolbar > span:first-child {
     font-size: 10px;
@@ -2367,14 +2467,21 @@
     padding: 8px;
   }
   .sc-map-toolbar {
-    height: 48px;
-    padding: 0 13px;
+    height: auto;
+    padding: 10px 13px;
   }
   .sc-map-toolbar > span:first-child {
     font-size: 11px;
   }
   .sc-map-toolbar > .sc-tag {
     font-size: 8px;
+  }
+  .sc-stopover-controls .sc-icon-button {
+    width: 34px;
+    height: 34px;
+  }
+  .sc-stopover-label {
+    font-size: 12px;
   }
   .sc-map-stage {
     min-height: 390px;

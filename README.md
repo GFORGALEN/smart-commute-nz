@@ -6,7 +6,8 @@ job seekers, and future integration with 蹲蹲.
 
 [Live demo](https://gforgalen.github.io/smart-commute-nz/) ·
 [Source](https://github.com/GFORGALEN/smart-commute-nz) ·
-[Data sources](docs/DATA_SOURCES.md) · [Google Maps setup and costs](docs/GOOGLE_MAPS.md)
+[Data sources](docs/DATA_SOURCES.md) · [Google Maps setup and costs](docs/GOOGLE_MAPS.md) ·
+[AT integration plan](docs/AT_INTEGRATION.md)
 
 ![Desktop planner](docs/screenshots/desktop.png)
 
@@ -36,7 +37,9 @@ not cache Google Maps/Places or AT responses. Local development has no service w
 - Three modes: drive, bus/train, and drive to a hub then public transport.
 - Independently editable outward and return legs: distance, fuel consumption,
   travel time, fares, tolls and transfers; parking is one total charge per commute.
-- Alternative driving routes, manual waypoint labels and familiar-route saving.
+- Alternative driving routes and familiar-route saving. Google driving supports
+  up to ten ordered stops through Places search or map clicks, with reorder/remove
+  controls and automatic route refresh. Manual routes retain editable waypoint labels.
 - Swap places, save places, request browser geolocation only on a button click.
 - Fuel, parking, fares, tolls and optional maintenance breakdown; daily, weekly
   and monthly projections with editable commute frequency.
@@ -85,6 +88,12 @@ refresh. Fuel, parking, tolls and other cost changes recalculate locally without
 route request. Google distance and duration appear in the same journey editor and
 the selected route is drawn on the main map. The planner uses traffic-aware driving
 with the higher-priced Routes Pro SKU so departure times affect the route estimate.
+Add driving stops below the origin/destination or use the map's **Add stop on map**
+button. Stops are visited in the listed order; swapping endpoints and return journeys
+reverse the order. Google transit cannot accept intermediate stops, so the planner
+asks you to remove them or switch to driving. The transit editor links to AT Journey
+Planner for official fare verification. A GTFS key alone cannot supply missing fares;
+see the [AT integration plan](docs/AT_INTEGRATION.md).
 Never enable
 billing or purchase a service without the account owner's consent. No paid service
 was enabled by this project. A limited, owner-authorized live check on 9 October 2026

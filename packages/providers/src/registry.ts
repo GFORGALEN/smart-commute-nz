@@ -93,13 +93,15 @@ export const DATA_SOURCES: readonly DataSource[] = [
     status: 'not-integrated',
     verifiedOn: '2026-10-09',
     sourceUpdatedOn: null,
-    updateFrequency: 'Not verified for a selected feed',
-    license: 'Not verified; inspect AT API product terms before integrating or redistributing',
-    authentication: 'Developer portal subscription/access requirements must be checked',
+    updateFrequency: 'Not verified; inspected public feed dates 2026-09-30 to 2027-01-24',
+    license: 'Public GTFS download: CC BY 4.0; authenticated API product terms require review',
+    authentication:
+      'API: free portal registration, product subscription and subscription key; public ZIP: none',
     commercialUse: 'unverified',
     redistribution: 'unverified',
     limitations: [
       'No authenticated feed was queried.',
+      'Public ZIP inspection found empty fare tables and no populated stop zone_id values; it does not provide automatic fare quotes.',
       'Static GTFS is scheduling data; not automatically a route optimizer, realtime fare or parking tariff service.',
     ],
   },

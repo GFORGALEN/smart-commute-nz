@@ -197,6 +197,9 @@ export class GoogleRouteProvider implements RouteProvider {
   private busy = false;
   private map?: google.maps.Map;
   private mapLifecycleCleanup?: () => void;
+  private waypointSelectionCleanup?: () => void;
+  private overlayViewConstructor?: typeof google.maps.OverlayView;
+  private waypointMarkers: google.maps.OverlayView[] = [];
   private polylines: google.maps.Polyline[] = [];
   private sdkRoutes = new Map<string, GoogleRouteData>();
   private computationWarnings: string[] = [];
@@ -244,6 +247,8 @@ export class GoogleRouteProvider implements RouteProvider {
     element: HTMLElement,
     onError?: (error: RouteProviderError) => void,
   ): Promise<void> {
+    this.waypointSelectionCleanup?.();
+    this.clearWaypointMarkers();
     this.mapLifecycleCleanup?.();
     let ready = false;
     let failed = false;
@@ -256,6 +261,8 @@ export class GoogleRouteProvider implements RouteProvider {
       if (failed) return;
       failed = true;
       this.metrics.lastError = error.code;
+      this.waypointSelectionCleanup?.();
+      this.clearWaypointMarkers();
       this.clearMapRoutes();
       this.map = undefined;
       rejectFailure(error);
@@ -301,6 +308,7 @@ export class GoogleRouteProvider implements RouteProvider {
       });
       if (failed) await failure;
       this.map = map;
+      this.overlayViewConstructor = maps.OverlayView;
       const firstRender = new Promise<void>((resolve) => {
         readinessListener = map.addListener('idle', resolve);
       });
@@ -411,6 +419,79 @@ export class GoogleRouteProvider implements RouteProvider {
     this.polylines = [];
   }
 
+  /** One deliberate map click adds a coordinate without a reverse-geocoding request. */
+  beginWaypointSelection(onPick: (coordinates: google.maps.LatLngLiteral) => void): () => void {
+    this.waypointSelectionCleanup?.();
+    const map = this.map;
+    if (!map) throw new RouteProviderError('INVALID_INPUT', 'Load the map before choosing a stop.');
+    let active = true;
+    const cleanup = () => {
+      if (!active) return;
+      active = false;
+      listener.remove();
+      map.setOptions({ draggableCursor: null });
+      if (this.waypointSelectionCleanup === cleanup) this.waypointSelectionCleanup = undefined;
+    };
+    map.setOptions({ draggableCursor: 'crosshair' });
+    const listener = map.addListener('click', (event: google.maps.MapMouseEvent) => {
+      if (!active || !event.latLng) return;
+      const coordinates = event.latLng.toJSON();
+      locationValue({ label: 'Map stop', coordinates });
+      event.stop();
+      cleanup();
+      onPick(coordinates);
+    });
+    this.waypointSelectionCleanup = cleanup;
+    return cleanup;
+  }
+
+  clearWaypointMarkers(): void {
+    for (const marker of this.waypointMarkers) marker.setMap(null);
+    this.waypointMarkers = [];
+  }
+
+  /** Numbered overlays use the loaded map SDK and remain only in session memory. */
+  renderWaypointMarkers(locations: Location[]): void {
+    this.clearWaypointMarkers();
+    const OverlayView = this.overlayViewConstructor;
+    if (!this.map || !OverlayView) return;
+    locations.forEach((location, index) => {
+      if (!location.coordinates) return;
+      const coordinates = locationValue(location) as google.maps.LatLngLiteral;
+      const marker = new OverlayView();
+      const element = document.createElement('span');
+      element.className = 'sc-map-stop-marker';
+      element.textContent = String(index + 1);
+      element.title = location.label;
+      element.setAttribute('aria-hidden', 'true');
+      Object.assign(element.style, {
+        position: 'absolute',
+        transform: 'translate(-50%, -50%)',
+        width: '28px',
+        height: '28px',
+        display: 'grid',
+        placeItems: 'center',
+        borderRadius: '50%',
+        border: '2px solid white',
+        background: '#166a5b',
+        color: 'white',
+        font: 'bold 13px system-ui, sans-serif',
+        boxShadow: '0 2px 5px #0006',
+        pointerEvents: 'none',
+      });
+      marker.onAdd = () => marker.getPanes()?.markerLayer.appendChild(element);
+      marker.draw = () => {
+        const position = marker.getProjection()?.fromLatLngToDivPixel(coordinates);
+        if (!position) return;
+        element.style.left = `${position.x}px`;
+        element.style.top = `${position.y}px`;
+      };
+      marker.onRemove = () => element.remove();
+      marker.setMap(this.map!);
+      this.waypointMarkers.push(marker);
+    });
+  }
+
   renderRoute(id: string): void {
     this.clearMapRoutes();
     const route = this.sdkRoutes.get(id);
@@ -423,11 +504,14 @@ export class GoogleRouteProvider implements RouteProvider {
   }
 
   dispose(): void {
+    this.waypointSelectionCleanup?.();
+    this.clearWaypointMarkers();
     this.mapLifecycleCleanup?.();
     this.mapLifecycleCleanup = undefined;
     this.clearMapRoutes();
     this.sdkRoutes.clear();
     this.map = undefined;
+    this.overlayViewConstructor = undefined;
   }
 
   private async compute(request: GoogleComputeRequest): Promise<GoogleRouteData[]> {

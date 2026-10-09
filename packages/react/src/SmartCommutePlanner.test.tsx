@@ -16,6 +16,9 @@ const google = vi.hoisted(() => ({
   dispose: vi.fn(),
   attachAutocomplete: vi.fn(),
   clearMapRoutes: vi.fn(),
+  beginWaypointSelection: vi.fn(),
+  renderWaypointMarkers: vi.fn(),
+  clearWaypointMarkers: vi.fn(),
 }));
 vi.mock('@smart-commute/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@smart-commute/providers')>()),
@@ -26,12 +29,16 @@ vi.mock('@smart-commute/providers', async (importOriginal) => ({
     clearMapRoutes = google.clearMapRoutes;
     dispose = google.dispose;
     attachAutocomplete = google.attachAutocomplete;
+    beginWaypointSelection = google.beginWaypointSelection;
+    renderWaypointMarkers = google.renderWaypointMarkers;
+    clearWaypointMarkers = google.clearWaypointMarkers;
     getMetrics = () => ({ routeRequests: 1 });
   },
 }));
 
 const defaultProps = { destination: 'Britomart, Auckland' };
 const autocompleteSelectors: ((place: Location) => void)[] = [];
+const autocompleteCleanups: ReturnType<typeof vi.fn>[] = [];
 function liveResponse(id = 'google-drive-test', roundTrip = false) {
   return {
     routes: [
@@ -81,6 +88,16 @@ async function renderGooglePlanner() {
 const useOneWay = () =>
   fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
 const planRoute = () => fireEvent.click(screen.getByRole('button', { name: 'Plan route' }));
+async function addGoogleStop(location: Location) {
+  fireEvent.click(screen.getByRole('button', { name: 'Add stop' }));
+  await screen.findByLabelText('Search an intermediate stop', { exact: true });
+  const widgetCall = [...google.attachAutocomplete.mock.calls]
+    .reverse()
+    .find((call) => call[3]?.label === 'Search an intermediate stop');
+  const cleanup = autocompleteCleanups[google.attachAutocomplete.mock.calls.indexOf(widgetCall!)];
+  act(() => widgetCall![1](location));
+  return cleanup;
+}
 const goTo = (name: string) => fireEvent.click(screen.getByRole('tab', { name }));
 const changeNumber = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label, { exact: true }), { target: { value } });
@@ -118,8 +135,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
   autocompleteSelectors.length = 0;
+  autocompleteCleanups.length = 0;
   google.initializeMap.mockReset().mockResolvedValue(undefined);
   google.getRoutes.mockReset().mockResolvedValue(liveResponse());
+  google.beginWaypointSelection.mockReset().mockReturnValue(vi.fn());
   google.attachAutocomplete
     .mockReset()
     .mockImplementation(
@@ -143,6 +162,7 @@ beforeEach(() => {
             }),
           },
         );
+        autocompleteCleanups.push(cleanup);
         return cleanup;
       },
     );
@@ -849,6 +869,182 @@ describe('optional Google provider safeguards', () => {
       expect.objectContaining({ destination: { label: 'Latest destination' } }),
     );
     expect(screen.getByTestId('route-card-google-current')).toBeInTheDocument();
+  });
+});
+
+describe('Google intermediate stops', () => {
+  it('selects ordered Places stops before the first route query and cleans up each stop input', async () => {
+    await renderGooglePlanner();
+    useOneWay();
+    const first = { label: 'First selected stop', coordinates: { lat: -36.9, lng: 174.8 } };
+    const second = { label: 'Second selected stop', coordinates: { lat: -36.87, lng: 174.77 } };
+    const firstCleanup = await addGoogleStop(first);
+    const secondCleanup = await addGoogleStop(second);
+    expect(firstCleanup).toHaveBeenCalledOnce();
+    expect(secondCleanup).toHaveBeenCalledOnce();
+    expect(screen.queryByLabelText('Search an intermediate stop')).not.toBeInTheDocument();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    planRoute();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mode: 'drive', waypoints: [first, second] }),
+    );
+    expect(localStorage.getItem('smart-commute-nz:v1')).not.toContain(first.label);
+    expect(localStorage.getItem('smart-commute-nz:v1')).not.toContain(second.label);
+  });
+
+  it('refreshes the route with ordered stops after a move or removal without issuing overlapping immediate queries', async () => {
+    await renderGooglePlanner();
+    useOneWay();
+    const first = { label: 'First stop' };
+    const second = { label: 'Second stop' };
+    await addGoogleStop(first);
+    await addGoogleStop(second);
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByTestId('route-card-google-drive-test')).toBeInTheDocument(),
+    );
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Move stop earlier Second stop' }));
+    expect(screen.queryByTestId('route-card-google-drive-test')).not.toBeInTheDocument();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(799));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(google.getRoutes).toHaveBeenCalledTimes(2);
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ waypoints: [second, first] }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove waypoint Second stop' }));
+    await act(async () => vi.advanceTimersByTimeAsync(800));
+    expect(google.getRoutes).toHaveBeenCalledTimes(3);
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ waypoints: [first] }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Remove waypoint First stop' }));
+    await act(async () => vi.advanceTimersByTimeAsync(800));
+    expect(google.getRoutes).toHaveBeenCalledTimes(4);
+    expect(google.getRoutes).toHaveBeenLastCalledWith(expect.objectContaining({ waypoints: [] }));
+  });
+
+  it('refreshes an already planned route after a new stop is selected', async () => {
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByTestId('route-card-google-drive-test')).toBeInTheDocument(),
+    );
+    const stop = { label: 'Added after planning', coordinates: { lat: -36.91, lng: 174.85 } };
+    await addGoogleStop(stop);
+    expect(screen.queryByTestId('route-card-google-drive-test')).not.toBeInTheDocument();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(2));
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ waypoints: [stop] }),
+    );
+  });
+
+  it('limits the trip to ten stops and lets removal reopen the stop and map controls', async () => {
+    await renderGooglePlanner();
+    for (let index = 0; index < 10; index += 1) {
+      await addGoogleStop({ label: `Stop ${index + 1}` });
+    }
+    expect(screen.getByRole('button', { name: 'Add stop' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add stop on map' })).toBeDisabled();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove waypoint Stop 5' }));
+    expect(screen.getByRole('button', { name: 'Add stop' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Add stop on map' })).toBeEnabled();
+    await addGoogleStop({ label: 'Replacement stop' });
+    useOneWay();
+    planRoute();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        waypoints: [
+          ...Array.from({ length: 4 }, (_, index) => ({ label: `Stop ${index + 1}` })),
+          ...Array.from({ length: 5 }, (_, index) => ({ label: `Stop ${index + 6}` })),
+          { label: 'Replacement stop' },
+        ],
+      }),
+    );
+  });
+
+  it('blocks public transport planning with stops instead of silently discarding them', async () => {
+    await renderGooglePlanner();
+    await addGoogleStop({ label: 'Required stop' });
+    fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
+    expect(
+      screen.getByText(
+        'Google public transport routes do not support intermediate stops. Remove them or switch to driving before planning.',
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Plan route' })).toBeDisabled();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Remove waypoint Required stop' }));
+    expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled();
+  });
+
+  it('cleans up a stop search across tabs and restores the visible draft before adding it', async () => {
+    await renderGooglePlanner();
+    fireEvent.click(screen.getByRole('button', { name: 'Add stop' }));
+    const draftInput = await screen.findByLabelText('Search an intermediate stop');
+    fireEvent.input(draftInput, { target: { value: 'Retained typed stop' } });
+    const cleanup = autocompleteCleanups[autocompleteCleanups.length - 1]!;
+    goTo('Comparison');
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(screen.queryByLabelText('Search an intermediate stop')).not.toBeInTheDocument();
+    goTo('Planner');
+    await waitFor(() =>
+      expect(screen.getAllByLabelText('Starting point', { exact: true })).toHaveLength(1),
+    );
+    expect(screen.getAllByLabelText('Destination', { exact: true })).toHaveLength(1);
+    expect(await screen.findByLabelText('Search an intermediate stop')).toHaveValue(
+      'Retained typed stop',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Add stop' }));
+    expect(
+      screen.getByRole('button', { name: 'Remove waypoint Retained typed stop' }),
+    ).toBeVisible();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    useOneWay();
+    planRoute();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ waypoints: [{ label: 'Retained typed stop' }] }),
+    );
+  });
+
+  it('adds a clicked map stop once and cancels map selection after the pick', async () => {
+    let pick!: (coordinates: { lat: number; lng: number }) => void;
+    const cleanup = vi.fn();
+    google.beginWaypointSelection.mockImplementationOnce((onPick: typeof pick) => {
+      pick = (coordinates) => {
+        cleanup();
+        onPick(coordinates);
+      };
+      return cleanup;
+    });
+    await renderGooglePlanner();
+    useOneWay();
+    fireEvent.click(screen.getByRole('button', { name: 'Add stop on map' }));
+    expect(screen.getByRole('button', { name: 'Cancel map selection' })).toBeVisible();
+    const coordinates = { lat: -36.9, lng: 174.8 };
+    act(() => pick(coordinates));
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(screen.queryByRole('button', { name: 'Cancel map selection' })).not.toBeInTheDocument();
+    planRoute();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        waypoints: [
+          expect.objectContaining({ label: expect.stringContaining('Map stop 1'), coordinates }),
+        ],
+      }),
+    );
+    expect(google.renderWaypointMarkers).toHaveBeenLastCalledWith([
+      expect.objectContaining({ coordinates }),
+    ]);
   });
 });
 

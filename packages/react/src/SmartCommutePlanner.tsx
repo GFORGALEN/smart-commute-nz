@@ -1,7 +1,9 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownUp,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
   Bookmark,
   Car,
   Check,
@@ -295,6 +297,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const [locationLoading, setLocationLoading] = useState(false);
   const [locationError, setLocationError] = useState(false);
   const [waypointDraft, setWaypointDraft] = useState('');
+  const [stopoverSearchOpen, setStopoverSearchOpen] = useState(false);
+  const [stopoverDraft, setStopoverDraft] = useState<Location>({ label: '' });
+  const stopoverDraftRef = useRef(stopoverDraft);
+  stopoverDraftRef.current = stopoverDraft;
+  const [mapStopoverPicking, setMapStopoverPicking] = useState(false);
   const [inputsOpen, setInputsOpen] = useState(false);
   const [manualRequested, setManualRequested] = useState(false);
   const [googleStatus, setGoogleStatus] = useState<
@@ -314,6 +321,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const originSearchRef = useRef<HTMLDivElement>(null);
   const destinationSearchRef = useRef<HTMLDivElement>(null);
+  const stopoverSearchRef = useRef<HTMLDivElement>(null);
+  const stopoverSearchControl = useRef<(() => void) | null>(null);
+  const stopoverPickCleanup = useRef<(() => void) | null>(null);
   const autocompleteCleanup = useRef<(() => void)[]>([]);
   const autocompleteControls = useRef<
     { field: 'origin' | 'destination'; setValue: (value: string) => void }[]
@@ -347,6 +357,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const drivingPreference = state.options.find(
     (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
   );
+  const drivingStops = useMemo(
+    () => drivingPreference?.waypoints ?? [],
+    [drivingPreference?.waypoints],
+  );
+  const stopoverRoutingBlocked = editingMode === 'transit' && drivingStops.length > 0;
   const liveQueryFingerprint = JSON.stringify({
     origin: state.origin,
     destination: state.destination,
@@ -551,8 +566,21 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           ...state,
           origin: manualLocations.current.origin,
           destination: manualLocations.current.destination,
-          options: manualOptions.length ? manualOptions : createExampleOptions(),
-          savedRoutes: state.savedRoutes.filter((option) => !hasGoogleProvenance(option)),
+          options: (manualOptions.length ? manualOptions : createExampleOptions()).map(
+            (option) => ({
+              ...option,
+              waypoints: option.waypoints.filter(
+                (place) => !googlePlaceSignatures.current.has(JSON.stringify(place)),
+              ),
+            }),
+          ),
+          savedRoutes: state.savedRoutes.filter(
+            (option) =>
+              !hasGoogleProvenance(option) &&
+              !option.waypoints.some((place) =>
+                googlePlaceSignatures.current.has(JSON.stringify(place)),
+              ),
+          ),
         }),
       );
       localStorage.setItem('smart-commute-nz:appearance', JSON.stringify({ locale, theme }));
@@ -701,12 +729,76 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     setState((current) => ({ ...current, options: [...current.options, option] }));
   };
   const addWaypoint = (option: JourneyOption) => {
-    if (!waypointDraft.trim()) return;
+    if (!waypointDraft.trim() || option.waypoints.length >= 10) return;
     updateOption(option.id, { waypoints: [...option.waypoints, { label: waypointDraft.trim() }] });
     setWaypointDraft('');
   };
+  const appendDrivingStop = (location: Location) => {
+    if (!location.label.trim()) return;
+    setState((current) => {
+      const preference = current.options.find(
+        (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
+      );
+      if (!preference || preference.waypoints.length >= 10) return current;
+      return {
+        ...current,
+        options: current.options.map((option) =>
+          option.id === preference.id
+            ? { ...option, waypoints: [...option.waypoints, location] }
+            : option,
+        ),
+      };
+    });
+    setStopoverDraft({ label: '' });
+    setStopoverSearchOpen(false);
+  };
+  const appendDrivingStopAction = useRef(appendDrivingStop);
+  appendDrivingStopAction.current = appendDrivingStop;
+  const moveDrivingStop = (index: number, offset: -1 | 1) => {
+    if (!drivingPreference) return;
+    const waypoints = [...drivingStops];
+    const target = index + offset;
+    if (target < 0 || target >= waypoints.length) return;
+    [waypoints[index], waypoints[target]] = [waypoints[target]!, waypoints[index]!];
+    updateOption(drivingPreference.id, { waypoints });
+  };
+  const cancelMapStopoverPick = () => {
+    stopoverPickCleanup.current?.();
+    stopoverPickCleanup.current = null;
+    setMapStopoverPicking(false);
+  };
+  const beginMapStopoverPick = () => {
+    if (
+      !googleMode ||
+      googleStatus !== 'ready' ||
+      editingMode !== 'drive' ||
+      drivingStops.length >= 10
+    )
+      return;
+    try {
+      stopoverPickCleanup.current?.();
+      stopoverPickCleanup.current = provider.beginWaypointSelection((coordinates) => {
+        stopoverPickCleanup.current = null;
+        setMapStopoverPicking(false);
+        appendDrivingStopAction.current({
+          label: `${t('mapStopoverLabel', { number: drivingStops.length + 1 })} (${coordinates.lat.toFixed(5)}, ${coordinates.lng.toFixed(5)})`,
+          coordinates,
+        });
+        setInputsOpen(true);
+      });
+      setMapStopoverPicking(true);
+    } catch (error) {
+      setGoogleError(error instanceof Error ? error.message : t('googleError'));
+    }
+  };
   const saveRoute = (option: JourneyOption) => {
     if (hasGoogleProvenance(option) || comparison.error) return;
+    if (
+      option.waypoints.some((place) => googlePlaceSignatures.current.has(JSON.stringify(place)))
+    ) {
+      setNotice(t('googlePlaceNotSaved'));
+      return;
+    }
     setState((current) => ({
       ...current,
       savedRoutes: [
@@ -831,6 +923,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       !state.destination.label.trim()
     )
       return;
+    if (mode === 'transit' && drivingStops.length) {
+      setGoogleError(t('transitStopoverUnsupported'));
+      return;
+    }
     if (state.settings.roundTrip && !state.returnTime) {
       setNotice(t('googleMissingReturn'));
       return;
@@ -963,6 +1059,80 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     );
     return () => window.clearTimeout(timeout);
   }, [googleMode, googleStatus, liveQueryFingerprint]);
+
+  useEffect(() => {
+    if (
+      !stopoverSearchOpen ||
+      !googleMode ||
+      screen !== 'planner' ||
+      editingMode !== 'drive' ||
+      !addressSearchEnabled ||
+      !stopoverSearchRef.current
+    )
+      return;
+    let active = true;
+    const element = stopoverSearchRef.current;
+    const isCurrent = () => active && element.isConnected && activeProvider.current === provider;
+    void provider
+      .attachAutocomplete(
+        element,
+        (location) => {
+          if (!isCurrent()) return;
+          googlePlaceSignatures.current.add(JSON.stringify(location));
+          appendDrivingStopAction.current(location);
+        },
+        (error) => {
+          if (isCurrent()) setGoogleError(error.message);
+        },
+        {
+          initialValue: stopoverDraftRef.current.label,
+          label: t('stopoverSearch'),
+          onInput: (label) => {
+            if (isCurrent()) setStopoverDraft({ label });
+          },
+        },
+      )
+      .then((cleanup) => {
+        if (!isCurrent()) cleanup();
+        else stopoverSearchControl.current = cleanup;
+      })
+      .catch((error: unknown) => {
+        if (isCurrent()) setGoogleError(error instanceof Error ? error.message : t('googleError'));
+      });
+    return () => {
+      active = false;
+      stopoverSearchControl.current?.();
+      stopoverSearchControl.current = null;
+    };
+  }, [stopoverSearchOpen, googleMode, screen, editingMode, addressSearchEnabled, provider, t]);
+
+  const googleMapReady = googleStatus === 'ready' || googleStatus === 'routes';
+  useEffect(() => {
+    if (googleMode && screen === 'planner' && googleMapReady)
+      provider.renderWaypointMarkers(drivingStops);
+    else provider.clearWaypointMarkers();
+    return () => provider.clearWaypointMarkers();
+  }, [googleMode, screen, googleMapReady, drivingStops, provider]);
+  useEffect(() => {
+    stopoverPickCleanup.current?.();
+    stopoverPickCleanup.current = null;
+    setMapStopoverPicking(false);
+    return () => {
+      stopoverPickCleanup.current?.();
+      stopoverPickCleanup.current = null;
+    };
+  }, [googleMode, screen, editingMode, drivingStops.length, provider]);
+  useEffect(() => {
+    if (!mapStopoverPicking) return;
+    const cancelOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      stopoverPickCleanup.current?.();
+      stopoverPickCleanup.current = null;
+      setMapStopoverPicking(false);
+    };
+    window.addEventListener('keydown', cancelOnEscape);
+    return () => window.removeEventListener('keydown', cancelOnEscape);
+  }, [mapStopoverPicking]);
 
   const reconnectGoogle = () => {
     setManualRequested(false);
@@ -1427,12 +1597,115 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 ...current,
                 origin: current.destination,
                 destination: current.origin,
+                options: current.options.map((option) =>
+                  option.mode === 'drive' && !hasGoogleProvenance(option)
+                    ? { ...option, waypoints: [...option.waypoints].reverse() }
+                    : option,
+                ),
               }))
             }
           >
             <ArrowDownUp size={15} />
           </button>
         </div>
+        {googleMode && drivingPreference && (
+          <section className="sc-stopovers" aria-label={t('waypoints')}>
+            <div className="sc-stopover-heading">
+              <h3>{t('waypoints')}</h3>
+              <span>{drivingStops.length}/10</span>
+            </div>
+            <p className="sc-help">{t('stopoverHelp')}</p>
+            {drivingStops.length > 0 && (
+              <ol className="sc-stopover-list">
+                {drivingStops.map((place, index) => (
+                  <li key={`${index}-${place.label}`}>
+                    <span className="sc-stopover-number" aria-hidden="true">
+                      {index + 1}
+                    </span>
+                    <span className="sc-stopover-label">{place.label}</span>
+                    <div className="sc-stopover-controls">
+                      <button
+                        className="sc-icon-button"
+                        aria-label={`${t('moveStopoverUp')} ${place.label}`}
+                        disabled={index === 0}
+                        onClick={() => moveDrivingStop(index, -1)}
+                      >
+                        <ArrowUp size={14} />
+                      </button>
+                      <button
+                        className="sc-icon-button"
+                        aria-label={`${t('moveStopoverDown')} ${place.label}`}
+                        disabled={index === drivingStops.length - 1}
+                        onClick={() => moveDrivingStop(index, 1)}
+                      >
+                        <ArrowDown size={14} />
+                      </button>
+                      <button
+                        className="sc-icon-button"
+                        aria-label={`${t('removeWaypoint')} ${place.label}`}
+                        onClick={() =>
+                          updateOption(drivingPreference.id, {
+                            waypoints: drivingStops.filter((_, item) => item !== index),
+                          })
+                        }
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+            {stopoverSearchOpen && editingMode === 'drive' ? (
+              <div className="sc-stopover-search">
+                <div className="sc-field sc-live-address">
+                  <span>{t('stopoverSearch')}</span>
+                  <div ref={stopoverSearchRef} />
+                </div>
+                <div className="sc-stopover-search-actions">
+                  <button
+                    className="sc-small-button"
+                    disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
+                    onClick={() => appendDrivingStop(stopoverDraft)}
+                  >
+                    <Plus size={15} />
+                    {t('addStopover')}
+                  </button>
+                  <button
+                    className="sc-icon-button"
+                    aria-label={t('cancelStopoverSearch')}
+                    onClick={() => {
+                      setStopoverSearchOpen(false);
+                      setStopoverDraft({ label: '' });
+                    }}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                className="sc-small-button sc-full-width"
+                onClick={() => {
+                  setStopoverDraft({ label: '' });
+                  setStopoverSearchOpen(true);
+                }}
+                disabled={
+                  editingMode !== 'drive' || drivingStops.length >= 10 || !addressSearchEnabled
+                }
+              >
+                <Plus size={16} />
+                {t('addStopover')}
+              </button>
+            )}
+            {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
+            {stopoverRoutingBlocked && (
+              <p className="sc-error" role="status">
+                {t('transitStopoverUnsupported')}
+              </p>
+            )}
+          </section>
+        )}
         {(!state.origin.label.trim() || !state.destination.label.trim()) && (
           <p className="sc-error">{t('invalidLocation')}</p>
         )}
@@ -1579,6 +1852,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               disabled={
                 googleStatus !== 'ready' ||
                 comparison.error ||
+                stopoverRoutingBlocked ||
                 (state.settings.roundTrip && !state.returnTime)
               }
             >
@@ -1594,6 +1868,18 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               </p>
             )}
             {googleRequests > 0 && <small>{t('googleMetrics', { count: googleRequests })}</small>}
+            {editingMode === 'transit' && (
+              <div className="sc-at-fare-link">
+                <a
+                  href="https://at.govt.nz/bus-train-ferry/journey-planner"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {t('verifyATFare')}
+                </a>
+                <p className="sc-help">{t('atFareLinkHelp')}</p>
+              </div>
+            )}
           </div>
         )}
         {visibleOptions
@@ -1601,46 +1887,6 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             (option) => option.mode === editingMode && (!googleMode || option.id === selected?.id),
           )
           .map(renderOptionEditor)}
-        {googleMode && editingMode === 'drive' && drivingPreference && (
-          <div className="sc-waypoints">
-            <label>{t('waypoints')}</label>
-            {drivingPreference.waypoints.map((place, index) => (
-              <div className="sc-waypoint-item" key={`${index}-${place.label}`}>
-                <span>{place.label}</span>
-                <button
-                  className="sc-icon-button"
-                  aria-label={`${t('removeWaypoint')} ${place.label}`}
-                  onClick={() =>
-                    updateOption(drivingPreference.id, {
-                      waypoints: drivingPreference.waypoints.filter((_, item) => item !== index),
-                    })
-                  }
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ))}
-            <div className="sc-inline-field">
-              <input
-                aria-label={t('waypoints')}
-                placeholder={t('waypointPlaceholder')}
-                value={waypointDraft}
-                onChange={(event) => setWaypointDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') addWaypoint(drivingPreference);
-                }}
-              />
-              <button
-                className="sc-icon-button sc-solid"
-                aria-label={t('addWaypoint')}
-                disabled={!waypointDraft.trim()}
-                onClick={() => addWaypoint(drivingPreference)}
-              >
-                <Plus size={17} />
-              </button>
-            </div>
-          </div>
-        )}
         {!googleMode && editingMode === 'drive' && (
           <button className="sc-small-button sc-full-width" onClick={addDrivingRoute}>
             <Plus size={15} />
@@ -1727,10 +1973,26 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <Compass size={17} />
           {t(googleMode ? 'googleMapTitle' : 'schematic')}
         </span>
-        <span className="sc-tag">
-          {googleMode ? <MapPin size={12} /> : <WifiOff size={12} />}
-          {t(googleMode ? 'googleOnline' : 'manualMode')}
-        </span>
+        <div className="sc-map-tools">
+          {googleMode && (
+            <button
+              className="sc-small-button"
+              onClick={mapStopoverPicking ? cancelMapStopoverPick : beginMapStopoverPick}
+              disabled={
+                !mapStopoverPicking &&
+                (googleStatus !== 'ready' || editingMode !== 'drive' || drivingStops.length >= 10)
+              }
+              aria-pressed={mapStopoverPicking}
+            >
+              {mapStopoverPicking ? <X size={14} /> : <Plus size={14} />}
+              {t(mapStopoverPicking ? 'cancelStopoverPick' : 'pickStopoverOnMap')}
+            </button>
+          )}
+          <span className="sc-tag">
+            {googleMode ? <MapPin size={12} /> : <WifiOff size={12} />}
+            {t(googleMode ? 'googleOnline' : 'manualMode')}
+          </span>
+        </div>
       </div>
       {googleMode && (
         <div className="sc-map-stage">
@@ -1739,6 +2001,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             ref={googleMapRef}
             aria-label={t('googleMapDescription')}
           />
+          {mapStopoverPicking && (
+            <p className="sc-map-stopover-prompt" role="status">
+              {t('pickStopoverHint')}
+            </p>
+          )}
           {(googleStatus === 'idle' || googleStatus === 'loading') && (
             <div className="sc-map-loading" role="status">
               {t('googleLoading')}

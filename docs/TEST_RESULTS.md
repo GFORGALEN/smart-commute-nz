@@ -10,7 +10,7 @@ live follow-up is described below.
 | `npm run format:check`                      | Passed                                                     |
 | `npm run lint`                              | Passed, no warnings                                        |
 | `npm run typecheck`                         | Passed, strict TypeScript                                  |
-| `npm run test`                              | **145 passed** across four files                           |
+| `npm run test`                              | **155 passed** across four files                           |
 | Production app and independent widget build | Passed with `/smart-commute-nz/` base                      |
 | Development Playwright                      | **20 passed**, four production-only cases skipped          |
 | Production Playwright                       | **24 passed**, no skipped cases                            |
@@ -25,13 +25,14 @@ simultaneous independent widgets, including uniqueness of document element IDs.
 - **39 core tests:** fuel formula, zero and invalid inputs, separate outward/return
   legs, parking once, fares, tolls, maintenance, changing prices/consumption,
   weekly/monthly projections, time value and deterministic ranking.
-- **48 provider tests:** current SDK request shapes via injected test fixtures,
+- **51 provider tests:** current SDK request shapes via injected test fixtures,
   missing keys, quota and API errors, separate return requests, transit fare
   completeness, top-level SDK field masks, structured SDK/RPC error handling,
   sanitized error messages, synchronized autocomplete text and selection races,
   first-map-idle readiness, authentication failure handling, SDK timeouts, cleanup,
-  manual input validation and dated AT fare rules.
-- **36 planner tests:** editable costs, persistence, callback/host props, bilingual
+  manual input validation and dated AT fare rules. Waypoint cases cover two-stop
+  return order, ten-stop limits, map click/cancel/disposal and numbered overlay cleanup.
+- **43 planner tests:** editable costs, persistence, callback/host props, bilingual
   UI, Google failure/attribution, transient Google data, stale async query rejection,
   incomplete returns, stale AT fare exclusion, manual fare recovery and parking
   acknowledgment reset. Google-first cases cover automatic map/address initialization,
@@ -44,6 +45,9 @@ simultaneous independent widgets, including uniqueness of document element IDs.
   Google transit geometry stays read-only while fares remain editable. Offline
   parking/toll edits propagate to existing live routes on reconnection, and late
   authentication failures are not overwritten by an in-flight route response.
+  Driving stops cover Places selection, first-query inclusion, reorder/removal and
+  debounced updates, ten-stop limits, transit rejection, one-click map selection,
+  search cleanup/draft restoration and exclusion of Places content from local storage.
 - **22 AT helper tests:** verified zones, concession eligibility, Auckland tag-on
   time, independent return times, transfer windows, explicit ride segments, changed
   endpoints, malformed durations and reapplication after context changes.
@@ -123,6 +127,14 @@ coverage or Google return-route behavior. A 393 px mobile check found no horizon
 overflow. Disconnecting switched to editable manual inputs while preserving the
 edited fuel price; reconnecting restored the Google map. This final smoke
 check reported no console or uncaught page errors.
+
+A further bounded stopover scenario used two one-way driving queries on the same
+date. Real Places selection and a map click both added stops; ordering changed before
+the first route query, removing a stop refreshed the route, and one numbered marker
+remained for the retained stop. Transit planning with stops was blocked explicitly
+and exposed the official AT fare link. The 393 px mobile check had no horizontal
+overflow or console/page errors. These checks do not certify every stop location or
+AT fare availability.
 
 ## Practical limits
 

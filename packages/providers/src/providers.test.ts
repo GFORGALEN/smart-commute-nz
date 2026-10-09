@@ -110,23 +110,51 @@ describe('Google adapter without external paid requests', () => {
       [drive(19000), drive(21000)],
       [drive(22000, 1800000)],
     ]);
+    const waypoints = [
+      { label: 'First waypoint', coordinates: { lat: -36.9, lng: 174.8 } },
+      { label: 'Second waypoint', coordinates: { lat: -36.87, lng: 174.77 } },
+    ];
     const result = await provider.getRoutes({
       ...request,
       roundTrip: true,
       returnTime: nzWeekday,
-      waypoints: [{ label: 'My waypoint' }],
+      waypoints,
     });
     expect(computeRoutes).toHaveBeenCalledTimes(2);
     expect(computeRoutes.mock.calls[0]?.[0].computeAlternativeRoutes).toBe(false);
     expect(computeRoutes.mock.calls[0]?.[0].departureTime).toBeUndefined();
     expect(computeRoutes.mock.calls[1]?.[0].departureTime).toBeUndefined();
     expect(computeRoutes.mock.calls[1]?.[0].origin).toBe('User destination');
+    expect(computeRoutes.mock.calls[0]?.[0].intermediates).toEqual(
+      waypoints.map((place) => ({ location: place.coordinates })),
+    );
+    expect(computeRoutes.mock.calls[1]?.[0].intermediates).toEqual(
+      [...waypoints].reverse().map((place) => ({ location: place.coordinates })),
+    );
     expect(result.routes).toHaveLength(2);
     expect(result.routes[0]?.outbound[0]?.distanceKm).toBe(19);
     expect(result.routes[0]?.inbound[0]?.distanceKm).toBe(22);
     expect(result.routes[0]?.inbound[0]?.durationMinutes).toBe(30);
     expect(result.warnings).toContain('Test response warning');
     expect(result.attribution).toBe('Google Maps');
+    expect(result.routes[0]?.waypoints).toEqual(waypoints);
+  });
+  it('accepts ten ordered driving stops and rejects eleven before loading or requesting Google', async () => {
+    const waypoints = Array.from({ length: 11 }, (_, index) => ({ label: `Stop ${index + 1}` }));
+    const rejected = mockGoogle([]);
+    await expect(rejected.provider.getRoutes({ ...request, waypoints })).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+    });
+    expect(rejected.loadLibrary).not.toHaveBeenCalled();
+    expect(rejected.computeRoutes).not.toHaveBeenCalled();
+    expect(rejected.provider.getMetrics().routeRequests).toBe(0);
+    const accepted = mockGoogle([[drive(1000)]]);
+    await accepted.provider.getRoutes({ ...request, waypoints: waypoints.slice(0, 10) });
+    expect(accepted.computeRoutes).toHaveBeenCalledOnce();
+    expect(accepted.computeRoutes.mock.calls[0]?.[0].intermediates).toEqual(
+      waypoints.slice(0, 10).map((place) => ({ location: place.label })),
+    );
+    expect(accepted.computeRoutes.mock.calls[0]?.[0].computeAlternativeRoutes).toBe(false);
   });
   it('requires a return time before making any paid requests', async () => {
     const { provider, computeRoutes } = mockGoogle([[drive(1000)]]);
@@ -515,6 +543,124 @@ describe('Google adapter without external paid requests', () => {
     expect(setMap.mock.calls[0]?.[0]).toBeInstanceOf(TestMap);
     provider.dispose();
     expect(setMap).toHaveBeenLastCalledWith(null);
+  });
+  it('accepts exactly one deliberate map stop and detaches selection listeners on cancellation or disposal', async () => {
+    type ClickEvent = {
+      latLng: { toJSON: () => { lat: number; lng: number } } | null;
+      stop: () => void;
+    };
+    const listeners: { callback: (event: ClickEvent) => void; remove: ReturnType<typeof vi.fn> }[] =
+      [];
+    const setOptions = vi.fn();
+    class TestMap {
+      setOptions = setOptions;
+      addListener(name: string, callback: (event?: ClickEvent) => void) {
+        const remove = vi.fn();
+        if (name === 'idle') queueMicrotask(() => callback());
+        else listeners.push({ callback: callback as (event: ClickEvent) => void, remove });
+        return { remove };
+      }
+    }
+    const loadLibrary = vi.fn().mockResolvedValue({ Map: TestMap });
+    const provider = new GoogleRouteProvider({ apiKey: 'test-key', loadLibrary });
+    try {
+      await provider.initializeMap(document.createElement('div'));
+      const firstPick = vi.fn();
+      const cleanup = provider.beginWaypointSelection(firstPick);
+      expect(setOptions).toHaveBeenLastCalledWith({ draggableCursor: 'crosshair' });
+      listeners[0]!.callback({ latLng: null, stop: vi.fn() });
+      expect(firstPick).not.toHaveBeenCalled();
+      const coordinates = { lat: -36.9, lng: 174.8 };
+      const stop = vi.fn();
+      const event = { latLng: { toJSON: () => coordinates }, stop };
+      listeners[0]!.callback(event);
+      listeners[0]!.callback(event);
+      cleanup();
+      expect(firstPick).toHaveBeenCalledExactlyOnceWith(coordinates);
+      expect(stop).toHaveBeenCalledOnce();
+      expect(listeners[0]!.remove).toHaveBeenCalledOnce();
+      expect(setOptions).toHaveBeenLastCalledWith({ draggableCursor: null });
+      const cancelledPick = vi.fn();
+      const cancel = provider.beginWaypointSelection(cancelledPick);
+      cancel();
+      listeners[1]!.callback(event);
+      expect(cancelledPick).not.toHaveBeenCalled();
+      expect(listeners[1]!.remove).toHaveBeenCalledOnce();
+      const disposedPick = vi.fn();
+      provider.beginWaypointSelection(disposedPick);
+      provider.dispose();
+      listeners[2]!.callback(event);
+      expect(disposedPick).not.toHaveBeenCalled();
+      expect(listeners[2]!.remove).toHaveBeenCalledOnce();
+      expect(provider.getMetrics()).toMatchObject({
+        mapLoads: 1,
+        routeRequests: 0,
+        geocodingRequests: 0,
+      });
+      expect(loadLibrary).toHaveBeenCalledExactlyOnceWith('maps');
+    } finally {
+      provider.dispose();
+    }
+  });
+  it('renders numbered stop markers in route order and clears replaced or disposed overlays', async () => {
+    const markerLayer = document.createElement('div');
+    const overlays: TestOverlay[] = [];
+    class TestOverlay {
+      onAdd?: () => void;
+      draw?: () => void;
+      onRemove?: () => void;
+      constructor() {
+        overlays.push(this);
+      }
+      getPanes = () => ({ markerLayer });
+      getProjection = () => ({
+        fromLatLngToDivPixel: (coordinates: { lat: number; lng: number }) => ({
+          x: coordinates.lng,
+          y: coordinates.lat,
+        }),
+      });
+      setMap = vi.fn((map: unknown) => {
+        if (map) {
+          this.onAdd?.();
+          this.draw?.();
+        } else this.onRemove?.();
+      });
+    }
+    class TestMap {
+      addListener(_name: string, callback: () => void) {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      }
+    }
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Map: TestMap, OverlayView: TestOverlay }),
+    });
+    try {
+      await provider.initializeMap(document.createElement('div'));
+      const stops = [
+        { label: 'First stop', coordinates: { lat: -36.9, lng: 174.8 } },
+        { label: 'Second stop', coordinates: { lat: -36.87, lng: 174.77 } },
+      ];
+      provider.renderWaypointMarkers(stops);
+      expect([...markerLayer.children].map((element) => element.textContent)).toEqual(['1', '2']);
+      expect([...markerLayer.children].map((element) => element.getAttribute('title'))).toEqual([
+        'First stop',
+        'Second stop',
+      ]);
+      provider.renderWaypointMarkers([stops[1]!]);
+      expect(overlays[0]!.setMap).toHaveBeenLastCalledWith(null);
+      expect(overlays[1]!.setMap).toHaveBeenLastCalledWith(null);
+      expect(markerLayer.childElementCount).toBe(1);
+      expect(markerLayer.firstElementChild).toHaveTextContent('1');
+      expect(markerLayer.firstElementChild).toHaveAttribute('title', 'Second stop');
+      provider.dispose();
+      expect(overlays[2]!.setMap).toHaveBeenLastCalledWith(null);
+      expect(markerLayer.childElementCount).toBe(0);
+      expect(provider.getMetrics().geocodingRequests).toBe(0);
+    } finally {
+      provider.dispose();
+    }
   });
   it('waits for the first map idle event before declaring the map ready', async () => {
     let renderReady: (() => void) | undefined;
