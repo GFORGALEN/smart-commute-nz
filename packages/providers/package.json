@@ -1,0 +1,12 @@
+{
+  "name": "@smart-commute/providers",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@smart-commute/core": "0.1.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,77 @@
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { SmartCommutePlanner } from '@smart-commute/react';
+import './styles.css';
+
+const parameters = new URLSearchParams(window.location.search);
+const embedded = parameters.get('embed') === '1';
+document.documentElement.dataset.embedded = String(embedded);
+function savedAppearance(): { locale?: 'en' | 'zh-CN'; theme?: 'light' | 'dark' } {
+  if (embedded) return {};
+  try {
+    const stored: unknown = JSON.parse(
+      localStorage.getItem('smart-commute-nz:appearance') || 'null',
+    );
+    if (stored && typeof stored === 'object') {
+      return {
+        locale: 'locale' in stored && stored.locale === 'zh-CN' ? 'zh-CN' : 'en',
+        theme: 'theme' in stored && stored.theme === 'dark' ? 'dark' : 'light',
+      };
+    }
+  } catch {
+    /* Appearance is optional. */
+  }
+  return {};
+}
+const appearance = savedAppearance();
+function savedDestination(): string | undefined {
+  if (embedded) return undefined;
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem('smart-commute-nz:v1') || 'null');
+    if (saved && typeof saved === 'object' && 'destination' in saved) {
+      const destination = saved.destination;
+      if (
+        destination &&
+        typeof destination === 'object' &&
+        'label' in destination &&
+        typeof destination.label === 'string'
+      )
+        return destination.label;
+    }
+  } catch {
+    /* Malformed or unavailable storage falls back to the sample. */
+  }
+  return undefined;
+}
+
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <SmartCommutePlanner
+      origin={parameters.get('origin') || undefined}
+      destination={parameters.get('destination') || savedDestination() || 'Britomart, Auckland'}
+      locale={
+        parameters.has('locale')
+          ? parameters.get('locale') === 'zh-CN'
+            ? 'zh-CN'
+            : 'en'
+          : appearance.locale || 'en'
+      }
+      theme={
+        parameters.has('theme')
+          ? parameters.get('theme') === 'dark'
+            ? 'dark'
+            : 'light'
+          : appearance.theme || 'light'
+      }
+      googleApiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY || undefined}
+    />
+  </React.StrictMode>,
+);
+
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {
+      // The manual calculator still works when storage or service workers are unavailable.
+    });
+  });
+}

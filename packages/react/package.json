@@ -1,0 +1,18 @@
+{
+  "name": "@smart-commute/react",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@smart-commute/core": "0.1.0",
+    "@smart-commute/providers": "0.1.0",
+    "@smart-commute/i18n": "0.1.0"
+  },
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19"
+  },
+  "license": "MIT"
+}

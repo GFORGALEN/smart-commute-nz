@@ -1,0 +1,9 @@
+{
+  "name": "@smart-commute/i18n",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "license": "MIT"
+}
