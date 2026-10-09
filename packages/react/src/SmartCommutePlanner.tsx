@@ -42,6 +42,7 @@ import {
 } from '@smart-commute/core';
 import {
   GoogleRouteProvider,
+  RouteProviderError,
   DATA_SOURCES,
   type RouteResult as ProviderRouteResult,
 } from '@smart-commute/providers';
@@ -56,7 +57,7 @@ export interface SmartCommutePlannerProps {
   fuelConsumption?: number;
   theme?: 'light' | 'dark';
   onRouteSelected?: (result: RouteResult) => void;
-  /** Optional restricted browser key. Google loads only after an explicit user action. */
+  /** Optional restricted browser key. Online planners load the map and address search on mount. */
   googleApiKey?: string;
 }
 
@@ -129,6 +130,12 @@ const atFareContext = (option: JourneyOption, state: PlannerState, currentMinute
     ]),
   });
 
+const defaultReturnTime = () => {
+  const date = new Date(Date.now() + 8 * 60 * 60 * 1000);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 function initialState(props: SmartCommutePlannerProps): PlannerState {
   const fallback: PlannerState = {
     origin: toLocation(props.origin ?? '4 Fong Road, Auckland'),
@@ -142,7 +149,7 @@ function initialState(props: SmartCommutePlannerProps): PlannerState {
     places: [],
     savedRoutes: [],
     departure: '',
-    returnTime: '',
+    returnTime: props.googleApiKey ? defaultReturnTime() : '',
     leaveNow: true,
   };
   try {
@@ -181,6 +188,7 @@ function initialState(props: SmartCommutePlannerProps): PlannerState {
             }
           })
         : [],
+      returnTime: saved.returnTime || fallback.returnTime,
     };
   } catch {
     return fallback;
@@ -288,7 +296,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const [locationError, setLocationError] = useState(false);
   const [waypointDraft, setWaypointDraft] = useState('');
   const [inputsOpen, setInputsOpen] = useState(false);
-  const [googleConsent, setGoogleConsent] = useState(false);
+  const [manualRequested, setManualRequested] = useState(false);
   const [googleStatus, setGoogleStatus] = useState<
     'idle' | 'loading' | 'ready' | 'routes' | 'error'
   >('idle');
@@ -307,17 +315,38 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const originSearchRef = useRef<HTMLDivElement>(null);
   const destinationSearchRef = useRef<HTMLDivElement>(null);
   const autocompleteCleanup = useRef<(() => void)[]>([]);
+  const autocompleteControls = useRef<
+    { field: 'origin' | 'destination'; setValue: (value: string) => void }[]
+  >([]);
   const autocompleteGeneration = useRef(0);
   const autocompletePending = useRef(false);
   const routePending = useRef(false);
+  const mapLoadPending = useRef(false);
+  const mapReadyProvider = useRef<GoogleRouteProvider | null>(null);
+  const resetProvider = useRef<GoogleRouteProvider | null>(null);
+  const mounted = useRef(true);
+  const lastRequestedQuery = useRef('');
+  const lastRequestedMode = useRef<'drive' | 'transit'>('drive');
   const googlePlaceSignatures = useRef(new Set<string>());
   const manualLocations = useRef({ origin: state.origin, destination: state.destination });
   const provider = useMemo(
-    () => new GoogleRouteProvider({ apiKey: props.googleApiKey }),
+    () => new GoogleRouteProvider({ apiKey: props.googleApiKey, trafficAware: true }),
     [props.googleApiKey],
   );
   const activeProvider = useRef(provider);
   activeProvider.current = provider;
+  const googleMode =
+    Boolean(props.googleApiKey) && online && !manualRequested && googleStatus !== 'error';
+  const visibleOptions = useMemo(
+    () =>
+      state.options.filter((option) =>
+        googleMode ? hasGoogleProvenance(option) : !hasGoogleProvenance(option),
+      ),
+    [state.options, googleMode],
+  );
+  const drivingPreference = state.options.find(
+    (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
+  );
   const liveQueryFingerprint = JSON.stringify({
     origin: state.origin,
     destination: state.destination,
@@ -350,7 +379,15 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     try {
       if (!state.origin.label.trim() || !state.destination.label.trim())
         return { result: null, error: true, incompleteOptions: [], staleFareOptions: [] };
-      const all = compareOptions(state.options, state.settings);
+      if (!visibleOptions.length) {
+        // Validate settings without presenting offline examples as live routes.
+        compareOptions(
+          state.options.filter((option) => !hasGoogleProvenance(option)),
+          state.settings,
+        );
+        return { result: null, error: false, incompleteOptions: [], staleFareOptions: [] };
+      }
+      const all = compareOptions(visibleOptions, state.settings);
       // Core exposes partial totals with a warning for callers that need them.
       // A planner must not rank those as complete round trips or project them.
       const incompleteOptions = all.results
@@ -380,7 +417,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     } catch {
       return { result: null, error: true, incompleteOptions: [], staleFareOptions: [] };
     }
-  }, [state, atFareContexts, currentMinute]);
+  }, [state, visibleOptions, atFareContexts, currentMinute]);
   const noComparableRoutesKey = comparison.staleFareOptions.length
     ? 'noComparableRoutes'
     : 'noCompleteRoutes';
@@ -448,18 +485,24 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   }, []);
   useEffect(() => {
     // Reattach the existing Google map after tab navigation; no new map/API request.
-    if (screen === 'planner' && googleMapRef.current && mapElementRef.current) {
+    if (screen === 'planner' && googleMode && googleMapRef.current && mapElementRef.current) {
       googleMapRef.current.replaceChildren(mapElementRef.current);
     }
-  }, [screen]);
+  }, [screen, googleMode]);
   useEffect(() => {
     autocompleteGeneration.current += 1;
     autocompleteCleanup.current.forEach((cleanup) => cleanup());
     autocompleteCleanup.current = [];
+    autocompleteControls.current = [];
     autocompletePending.current = false;
     setAddressSearchEnabled(false);
     setAddressSearchPending(false);
-  }, [screen, googleConsent, provider]);
+  }, [screen, googleMode, provider]);
+  useEffect(() => {
+    for (const control of autocompleteControls.current) {
+      control.setValue(control.field === 'origin' ? state.origin.label : state.destination.label);
+    }
+  }, [state.origin.label, state.destination.label, addressSearchEnabled]);
   useEffect(() => {
     setState((current) =>
       current.options.some(hasGoogleProvenance)
@@ -470,17 +513,30 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     provider.clearMapRoutes();
   }, [liveQueryFingerprint, provider]);
   useEffect(() => {
+    if (resetProvider.current === provider) return;
+    resetProvider.current = provider;
     mapElementRef.current = null;
+    mapReadyProvider.current = null;
+    mapLoadPending.current = false;
+    lastRequestedQuery.current = '';
     setGoogleStatus('idle');
     setGoogleRequests(0);
     setGoogleError('');
+  }, [provider]);
+  useEffect(() => {
+    mounted.current = true;
     return () => {
+      mounted.current = false;
       autocompleteGeneration.current += 1;
       autocompleteCleanup.current.forEach((cleanup) => cleanup());
       autocompleteCleanup.current = [];
+      autocompleteControls.current = [];
+      // StrictMode immediately remounts effects. Dispose only after a real exit.
+      queueMicrotask(() => {
+        if (!mounted.current || activeProvider.current !== provider) provider.dispose();
+      });
     };
   }, [provider]);
-  useEffect(() => () => provider.dispose(), [provider]);
   useEffect(() => {
     if (comparison.error) return;
     try {
@@ -518,6 +574,37 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       options: current.options.map((option) =>
         option.id === id ? { ...option, ...patch } : option,
       ),
+    }));
+  const updateDrivingCosts = (patch: {
+    parkingCost?: number;
+    outboundToll?: number;
+    inboundToll?: number;
+  }) =>
+    setState((current) => ({
+      ...current,
+      options: current.options.map((option) => {
+        if (
+          option.mode !== 'drive' ||
+          (option.id !== drivingPreference?.id && !hasGoogleProvenance(option))
+        )
+          return option;
+        return {
+          ...option,
+          ...(patch.parkingCost === undefined
+            ? {}
+            : { parkingCost: patch.parkingCost, parkingVerified: false }),
+          outbound: option.outbound.map((leg) =>
+            leg.mode === 'drive' && patch.outboundToll !== undefined
+              ? { ...leg, toll: patch.outboundToll }
+              : leg,
+          ),
+          inbound: option.inbound.map((leg) =>
+            leg.mode === 'drive' && patch.inboundToll !== undefined
+              ? { ...leg, toll: patch.inboundToll }
+              : leg,
+          ),
+        };
+      }),
     }));
   const updateLeg = (id: string, direction: Direction, index: number, patch: Partial<TravelLeg>) =>
     setState((current) => ({
@@ -558,6 +645,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     }));
   const selectResult = (result: RouteResult) => {
     setSelectedId(result.id);
+    if (googleMode) setEditingMode(result.option.mode);
     props.onRouteSelected?.(result);
     if (hasGoogleProvenance(result.option)) provider.renderRoute(result.id);
     else provider.clearMapRoutes();
@@ -629,7 +717,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     setNotice(t('routeSaved'));
   };
   const loadGoogle = async () => {
-    if (!googleConsent || !props.googleApiKey || !googleMapRef.current) return;
+    if (!googleMode || !googleMapRef.current || mapLoadPending.current) return;
+    if (mapReadyProvider.current === provider && mapElementRef.current) {
+      googleMapRef.current.replaceChildren(mapElementRef.current);
+      setGoogleStatus('ready');
+      return;
+    }
+    mapLoadPending.current = true;
     setGoogleError('');
     setGoogleStatus('loading');
     try {
@@ -637,22 +731,30 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       mapElementRef.current.style.width = '100%';
       mapElementRef.current.style.height = '100%';
       googleMapRef.current.replaceChildren(mapElementRef.current);
-      await provider.initializeMap(mapElementRef.current);
-      if (activeProvider.current !== provider) {
+      await provider.initializeMap(mapElementRef.current, (error) => {
+        if (!mounted.current || activeProvider.current !== provider) return;
+        mapReadyProvider.current = null;
+        setGoogleError(error.message);
+        setGoogleStatus('error');
+      });
+      if (!mounted.current || activeProvider.current !== provider) {
         provider.dispose();
         return;
       }
+      mapReadyProvider.current = provider;
       provider.renderRoute(selectedId);
       setGoogleStatus('ready');
     } catch (error) {
-      if (activeProvider.current !== provider) return;
+      if (!mounted.current || activeProvider.current !== provider) return;
       setGoogleError(error instanceof Error ? error.message : t('googleError'));
       setGoogleStatus('error');
+    } finally {
+      if (activeProvider.current === provider) mapLoadPending.current = false;
     }
   };
   const enableAddressSearch = async () => {
     if (
-      !googleConsent ||
+      !googleMode ||
       autocompletePending.current ||
       addressSearchEnabled ||
       !originSearchRef.current ||
@@ -683,12 +785,26 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             setState((current) => ({ ...current, [field]: location }));
           },
           onError,
+          {
+            initialValue: state[field].label,
+            label: t(field === 'origin' ? 'origin' : 'destination'),
+            onInput: (label) => {
+              if (!isCurrent()) return;
+              setState((current) =>
+                current[field].label === label && !current[field].coordinates
+                  ? current
+                  : { ...current, [field]: { label } },
+              );
+            },
+          },
         );
         if (!isCurrent()) {
           cleanup();
           return false;
         }
         autocompleteCleanup.current.push(cleanup);
+        if (cleanup.setValue)
+          autocompleteControls.current.push({ field, setValue: cleanup.setValue });
         return true;
       };
       if (!(await attach('origin', originElement))) return;
@@ -707,7 +823,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     }
   };
   const getGoogleRoutes = async (mode: 'drive' | 'transit' = 'drive') => {
-    if (!googleConsent || comparison.error || routePending.current) return;
+    if (
+      !googleMode ||
+      comparison.error ||
+      routePending.current ||
+      !state.origin.label.trim() ||
+      !state.destination.label.trim()
+    )
+      return;
     if (state.settings.roundTrip && !state.returnTime) {
       setNotice(t('googleMissingReturn'));
       return;
@@ -715,33 +838,67 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     setGoogleStatus('routes');
     routePending.current = true;
     const query = activeQuery.current;
+    lastRequestedQuery.current = query;
+    lastRequestedMode.current = mode;
     setGoogleError('');
     try {
       const response = await provider.getRoutes({
         origin: state.origin,
         destination: state.destination,
         mode,
-        waypoints:
-          mode === 'drive'
-            ? (state.options.find((option) => option.id === selectedId && option.mode === 'drive')
-                ?.waypoints ?? [])
-            : [],
-        departureTime: state.leaveNow || !state.departure ? new Date() : new Date(state.departure),
+        waypoints: mode === 'drive' ? (drivingPreference?.waypoints ?? []) : [],
+        departureTime: state.leaveNow || !state.departure ? undefined : new Date(state.departure),
         returnTime: state.settings.roundTrip ? new Date(state.returnTime) : undefined,
         roundTrip: state.settings.roundTrip,
       });
-      if (activeProvider.current !== provider || activeQuery.current !== query) {
+      if (
+        !mounted.current ||
+        activeProvider.current !== provider ||
+        mapReadyProvider.current !== provider ||
+        activeQuery.current !== query
+      ) {
         provider.clearMapRoutes();
         return;
       }
       setGoogleResponse(response);
-      setState((current) => ({
-        ...current,
-        options: [
-          ...current.options.filter((option) => !hasGoogleProvenance(option)),
-          ...response.routes,
-        ],
-      }));
+      setState((current) => {
+        const costs = current.options.find(
+          (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
+        );
+        return {
+          ...current,
+          options: [
+            ...current.options.filter((option) => !hasGoogleProvenance(option)),
+            ...response.routes.map((option) =>
+              option.mode === 'drive'
+                ? {
+                    ...option,
+                    parkingCost: costs?.parkingCost ?? 0,
+                    outbound: option.outbound.map((leg) =>
+                      leg.mode === 'drive'
+                        ? {
+                            ...leg,
+                            toll:
+                              costs?.outbound.find((segment) => segment.mode === 'drive')?.toll ??
+                              0,
+                          }
+                        : leg,
+                    ),
+                    inbound: option.inbound.map((leg) =>
+                      leg.mode === 'drive'
+                        ? {
+                            ...leg,
+                            toll:
+                              costs?.inbound.find((segment) => segment.mode === 'drive')?.toll ?? 0,
+                          }
+                        : leg,
+                    ),
+                  }
+                : option,
+            ),
+          ],
+        };
+      });
       setGoogleRequests(provider.getMetrics().routeRequests);
       setGoogleStatus('ready');
       setNotice(t('googleRouteAdded'));
@@ -750,16 +907,69 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         provider.renderRoute(response.routes[0].id);
       }
     } catch (error) {
-      if (activeProvider.current !== provider || activeQuery.current !== query) return;
+      if (
+        !mounted.current ||
+        activeProvider.current !== provider ||
+        mapReadyProvider.current !== provider ||
+        activeQuery.current !== query
+      )
+        return;
       setGoogleRequests(provider.getMetrics().routeRequests);
       setGoogleError(error instanceof Error ? error.message : t('googleError'));
+      if (
+        error instanceof RouteProviderError &&
+        ['NETWORK_ERROR', 'REQUEST_DENIED', 'QUOTA_EXCEEDED'].includes(error.code)
+      ) {
+        setManualRequested(true);
+      }
     } finally {
       routePending.current = false;
-      if (activeProvider.current === provider) {
+      if (
+        mounted.current &&
+        activeProvider.current === provider &&
+        mapReadyProvider.current === provider
+      ) {
         setGoogleRequests(provider.getMetrics().routeRequests);
-        setGoogleStatus('ready');
+        setGoogleStatus((current) => (current === 'error' ? current : 'ready'));
       }
     }
+  };
+
+  const loadMapAction = useRef(loadGoogle);
+  loadMapAction.current = loadGoogle;
+  const addressSearchAction = useRef(enableAddressSearch);
+  addressSearchAction.current = enableAddressSearch;
+  const routeAction = useRef(getGoogleRoutes);
+  routeAction.current = getGoogleRoutes;
+  useEffect(() => {
+    if (googleMode && screen === 'planner' && googleStatus === 'idle') void loadMapAction.current();
+  }, [googleMode, googleStatus, provider, screen]);
+  useEffect(() => {
+    if (googleMode && screen === 'planner' && googleStatus === 'ready' && !addressSearchEnabled) {
+      void addressSearchAction.current();
+    }
+  }, [googleMode, googleStatus, addressSearchEnabled, provider, screen]);
+  useEffect(() => {
+    if (
+      !googleMode ||
+      googleStatus !== 'ready' ||
+      !lastRequestedQuery.current ||
+      lastRequestedQuery.current === liveQueryFingerprint
+    )
+      return;
+    const timeout = window.setTimeout(
+      () => void routeAction.current(lastRequestedMode.current),
+      800,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [googleMode, googleStatus, liveQueryFingerprint]);
+
+  const reconnectGoogle = () => {
+    setManualRequested(false);
+    setGoogleError('');
+    mapReadyProvider.current = null;
+    lastRequestedQuery.current = '';
+    setGoogleStatus('idle');
   };
 
   const renderDriveLeg = (option: JourneyOption, direction: Direction, index: number) => {
@@ -769,37 +979,66 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     return (
       <div className="sc-driving-fields" key={`${direction}-${index}`}>
         <div className="sc-field-grid">
-          <NumberField
-            label={
-              primary
-                ? t(direction === 'outbound' ? 'outboundDistance' : 'inboundDistance')
-                : `${option.name} · ${t('legDistance', { direction: directionName })}`
-            }
-            value={leg.distanceKm ?? 0}
-            onChange={(distanceKm) => updateLeg(option.id, direction, index, { distanceKm })}
-            t={t}
-          />
-          <NumberField
-            label={t('legDuration', { direction: directionName })}
-            value={leg.durationMinutes}
-            onChange={(durationMinutes) =>
-              updateLeg(option.id, direction, index, { durationMinutes })
-            }
-            t={t}
-            step="1"
-          />
-          <NumberField
-            label={t('legConsumption', { direction: directionName })}
-            value={leg.fuelConsumption ?? state.settings.fuelConsumption}
-            onChange={(fuelConsumption) =>
-              updateLeg(option.id, direction, index, { fuelConsumption })
-            }
-            t={t}
-          />
+          {hasGoogleProvenance(option) ? (
+            <div className="sc-route-measurements">
+              <div>
+                <span>{t('legDistance', { direction: directionName })}</span>
+                <input
+                  aria-label={t('legDistance', { direction: directionName })}
+                  readOnly
+                  value={shortNumber(leg.distanceKm ?? 0)}
+                />
+              </div>
+              <div>
+                <span>{t('legDuration', { direction: directionName })}</span>
+                <input
+                  aria-label={t('legDuration', { direction: directionName })}
+                  readOnly
+                  value={shortNumber(leg.durationMinutes)}
+                />
+              </div>
+            </div>
+          ) : (
+            <>
+              <NumberField
+                label={
+                  primary
+                    ? t(direction === 'outbound' ? 'outboundDistance' : 'inboundDistance')
+                    : `${option.name} · ${t('legDistance', { direction: directionName })}`
+                }
+                value={leg.distanceKm ?? 0}
+                onChange={(distanceKm) => updateLeg(option.id, direction, index, { distanceKm })}
+                t={t}
+              />
+              <NumberField
+                label={t('legDuration', { direction: directionName })}
+                value={leg.durationMinutes}
+                onChange={(durationMinutes) =>
+                  updateLeg(option.id, direction, index, { durationMinutes })
+                }
+                t={t}
+                step="1"
+              />
+              <NumberField
+                label={t('legConsumption', { direction: directionName })}
+                value={leg.fuelConsumption ?? state.settings.fuelConsumption}
+                onChange={(fuelConsumption) =>
+                  updateLeg(option.id, direction, index, { fuelConsumption })
+                }
+                t={t}
+              />
+            </>
+          )}
           <NumberField
             label={t('legToll', { direction: directionName })}
             value={leg.toll ?? 0}
-            onChange={(toll) => updateLeg(option.id, direction, index, { toll })}
+            onChange={(toll) =>
+              hasGoogleProvenance(option) || option.id === drivingPreference?.id
+                ? updateDrivingCosts(
+                    direction === 'outbound' ? { outboundToll: toll } : { inboundToll: toll },
+                  )
+                : updateLeg(option.id, direction, index, { toll })
+            }
             t={t}
           />
         </div>
@@ -817,6 +1056,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
 
   const renderTransitLeg = (option: JourneyOption, direction: Direction, index: number) => {
     const leg = option[direction][index];
+    const live = hasGoogleProvenance(option);
     const transitIndex = option[direction].findIndex(
       (segment) => segment.mode === 'bus' || segment.mode === 'train',
     );
@@ -831,45 +1071,66 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         <div className="sc-segment-head">
           <label>
             {t('legType')}
-            <select
-              value={leg.mode}
-              onChange={(event) =>
-                updateLeg(option.id, direction, index, {
-                  mode: event.target.value as TravelLeg['mode'],
-                  fare: ['bus', 'train'].includes(event.target.value) ? (leg.fare ?? 0) : undefined,
-                  transfers: 0,
+            {live ? (
+              <input aria-label={t('legType')} readOnly value={t(legKeys[leg.mode])} />
+            ) : (
+              <select
+                value={leg.mode}
+                onChange={(event) =>
+                  updateLeg(option.id, direction, index, {
+                    mode: event.target.value as TravelLeg['mode'],
+                    fare: ['bus', 'train'].includes(event.target.value)
+                      ? (leg.fare ?? 0)
+                      : undefined,
+                    transfers: 0,
+                  })
+                }
+              >
+                {(['bus', 'train', 'walk', 'wait', 'parking'] as const).map((mode) => (
+                  <option value={mode} key={mode}>
+                    {t(legKeys[mode])}
+                  </option>
+                ))}
+              </select>
+            )}
+          </label>
+          {!live && (
+            <button
+              className="sc-icon-button"
+              aria-label={t('removeSegment')}
+              onClick={() =>
+                updateOption(option.id, {
+                  [direction]: option[direction].filter(
+                    (_, segmentIndex) => segmentIndex !== index,
+                  ),
                 })
               }
             >
-              {(['bus', 'train', 'walk', 'wait', 'parking'] as const).map((mode) => (
-                <option value={mode} key={mode}>
-                  {t(legKeys[mode])}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="sc-icon-button"
-            aria-label={t('removeSegment')}
-            onClick={() =>
-              updateOption(option.id, {
-                [direction]: option[direction].filter((_, segmentIndex) => segmentIndex !== index),
-              })
-            }
-          >
-            <X size={15} />
-          </button>
+              <X size={15} />
+            </button>
+          )}
         </div>
         <div className="sc-field-grid">
-          <NumberField
-            label={t('segmentDuration', { mode: t(legKeys[leg.mode]) })}
-            value={leg.durationMinutes}
-            onChange={(durationMinutes) =>
-              updateLeg(option.id, direction, index, { durationMinutes })
-            }
-            t={t}
-            step="1"
-          />
+          {live ? (
+            <label className="sc-route-measurements">
+              <span>{t('segmentDuration', { mode: t(legKeys[leg.mode]) })}</span>
+              <input
+                aria-label={t('segmentDuration', { mode: t(legKeys[leg.mode]) })}
+                readOnly
+                value={shortNumber(leg.durationMinutes)}
+              />
+            </label>
+          ) : (
+            <NumberField
+              label={t('segmentDuration', { mode: t(legKeys[leg.mode]) })}
+              value={leg.durationMinutes}
+              onChange={(durationMinutes) =>
+                updateLeg(option.id, direction, index, { durationMinutes })
+              }
+              t={t}
+              step="1"
+            />
+          )}
           {['bus', 'train'].includes(leg.mode) && (
             <>
               <NumberField
@@ -878,14 +1139,21 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 onChange={(fare) => updateLeg(option.id, direction, index, { fare })}
                 t={t}
               />
-              <NumberField
-                label={t('transfers')}
-                value={leg.transfers ?? 0}
-                onChange={(transfers) => updateLeg(option.id, direction, index, { transfers })}
-                t={t}
-                step="1"
-                integer
-              />
+              {live ? (
+                <label className="sc-route-measurements">
+                  <span>{t('transfers')}</span>
+                  <input aria-label={t('transfers')} readOnly value={leg.transfers ?? 0} />
+                </label>
+              ) : (
+                <NumberField
+                  label={t('transfers')}
+                  value={leg.transfers ?? 0}
+                  onChange={(transfers) => updateLeg(option.id, direction, index, { transfers })}
+                  t={t}
+                  step="1"
+                  integer
+                />
+              )}
             </>
           )}
         </div>
@@ -897,7 +1165,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     <div key={option.id} className="sc-option-editor" data-testid={`route-editor-${option.id}`}>
       <div className="sc-editor-title">
         <h3>{nameOf(option)}</h3>
-        {option.id !== 'drive' && option.mode === 'drive' && (
+        {option.id !== 'drive' && option.mode === 'drive' && !hasGoogleProvenance(option) && (
           <button
             className="sc-icon-button"
             aria-label={t('removeRoute')}
@@ -912,7 +1180,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           </button>
         )}
       </div>
-      {!['drive', 'transit', 'hybrid'].includes(option.id) && (
+      {!hasGoogleProvenance(option) && !['drive', 'transit', 'hybrid'].includes(option.id) && (
         <TextField
           label={t('routeName')}
           value={option.name}
@@ -961,7 +1229,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                   ? renderDriveLeg(option, direction, index)
                   : renderTransitLeg(option, direction, index),
               )}
-              {option.mode !== 'drive' && (
+              {option.mode !== 'drive' && !hasGoogleProvenance(option) && (
                 <button
                   className="sc-small-button"
                   onClick={() =>
@@ -985,7 +1253,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           label={t(option.mode === 'hybrid' ? 'stationParking' : 'parking')}
           value={option.parkingCost}
           onChange={(parkingCost) =>
-            updateOption(option.id, { parkingCost, parkingVerified: false })
+            hasGoogleProvenance(option) || option.id === drivingPreference?.id
+              ? updateDrivingCosts({ parkingCost })
+              : updateOption(option.id, { parkingCost, parkingVerified: false })
           }
           t={t}
         />
@@ -1097,11 +1367,21 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         <div className="sc-location-fields">
           <div className="sc-location-row">
             <span className="sc-route-dot" />
-            <TextField
-              label={t('origin')}
-              value={state.origin.label}
-              onChange={(label) => setState((current) => ({ ...current, origin: { label } }))}
-            />
+            {googleMode ? (
+              <div className="sc-field sc-live-address">
+                <span>{t('origin')}</span>
+                <div ref={originSearchRef} />
+                {!addressSearchEnabled && (
+                  <small>{addressSearchPending ? t('googleLoading') : state.origin.label}</small>
+                )}
+              </div>
+            ) : (
+              <TextField
+                label={t('origin')}
+                value={state.origin.label}
+                onChange={(label) => setState((current) => ({ ...current, origin: { label } }))}
+              />
+            )}
             <button
               className="sc-icon-button"
               aria-label={t('saveOrigin')}
@@ -1112,11 +1392,25 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           </div>
           <div className="sc-location-row">
             <MapPin className="sc-destination-pin" size={19} />
-            <TextField
-              label={t('destination')}
-              value={state.destination.label}
-              onChange={(label) => setState((current) => ({ ...current, destination: { label } }))}
-            />
+            {googleMode ? (
+              <div className="sc-field sc-live-address">
+                <span>{t('destination')}</span>
+                <div ref={destinationSearchRef} />
+                {!addressSearchEnabled && (
+                  <small>
+                    {addressSearchPending ? t('googleLoading') : state.destination.label}
+                  </small>
+                )}
+              </div>
+            ) : (
+              <TextField
+                label={t('destination')}
+                value={state.destination.label}
+                onChange={(label) =>
+                  setState((current) => ({ ...current, destination: { label } }))
+                }
+              />
+            )}
             <button
               className="sc-icon-button"
               aria-label={t('saveDestination')}
@@ -1146,19 +1440,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <LocateFixed size={14} />
           {t(locationLoading ? 'locating' : 'useLocation')}
         </button>
-        <p className="sc-help">{t('manualLocationNote')}</p>
-        {props.googleApiKey && (
-          <div
-            className="sc-address-search"
-            style={{ display: addressSearchEnabled && googleConsent ? 'block' : 'none' }}
-          >
-            <p>{t('googleOriginSearch')}</p>
-            <div ref={originSearchRef} />
-            <p>{t('googleDestinationSearch')}</p>
-            <div ref={destinationSearchRef} />
-            <p className="sc-help">{t('googlePlaceNotSaved')}</p>
-          </div>
-        )}
+        <p className="sc-help">{t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}</p>
         {locationError && (
           <p role="alert" className="sc-error">
             {t('locationFailed')}
@@ -1272,9 +1554,12 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         </div>
         <div className="sc-divider" />
         <h3 className="sc-section-heading">{t('routeParameters')}</h3>
-        <p className="sc-help">{t('routeHint')}</p>
+        <p className="sc-help">{t(googleMode ? 'liveRouteHint' : 'routeHint')}</p>
         <div className="sc-mode-switch" role="group" aria-label={t('routeParameters')}>
-          {(['drive', 'transit', 'hybrid'] as const).map((mode) => (
+          {(googleMode
+            ? (['drive', 'transit'] as const)
+            : (['drive', 'transit', 'hybrid'] as const)
+          ).map((mode) => (
             <button
               key={mode}
               className={editingMode === mode ? 'is-active' : ''}
@@ -1286,8 +1571,77 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             </button>
           ))}
         </div>
-        {state.options.filter((option) => option.mode === editingMode).map(renderOptionEditor)}
-        {editingMode === 'drive' && (
+        {googleMode && (
+          <div className="sc-routing-actions">
+            <button
+              className="sc-small-button sc-full-width"
+              onClick={() => void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')}
+              disabled={
+                googleStatus !== 'ready' ||
+                comparison.error ||
+                (state.settings.roundTrip && !state.returnTime)
+              }
+            >
+              <Route size={16} />
+              {t(googleStatus === 'routes' ? 'googleRoutesLoading' : 'planRoute')}
+            </button>
+            {state.settings.roundTrip && !state.returnTime && (
+              <p className="sc-help">{t('googleMissingReturn')}</p>
+            )}
+            {googleError && (
+              <p className="sc-error" role="alert">
+                {googleError}
+              </p>
+            )}
+            {googleRequests > 0 && <small>{t('googleMetrics', { count: googleRequests })}</small>}
+          </div>
+        )}
+        {visibleOptions
+          .filter(
+            (option) => option.mode === editingMode && (!googleMode || option.id === selected?.id),
+          )
+          .map(renderOptionEditor)}
+        {googleMode && editingMode === 'drive' && drivingPreference && (
+          <div className="sc-waypoints">
+            <label>{t('waypoints')}</label>
+            {drivingPreference.waypoints.map((place, index) => (
+              <div className="sc-waypoint-item" key={`${index}-${place.label}`}>
+                <span>{place.label}</span>
+                <button
+                  className="sc-icon-button"
+                  aria-label={`${t('removeWaypoint')} ${place.label}`}
+                  onClick={() =>
+                    updateOption(drivingPreference.id, {
+                      waypoints: drivingPreference.waypoints.filter((_, item) => item !== index),
+                    })
+                  }
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ))}
+            <div className="sc-inline-field">
+              <input
+                aria-label={t('waypoints')}
+                placeholder={t('waypointPlaceholder')}
+                value={waypointDraft}
+                onChange={(event) => setWaypointDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') addWaypoint(drivingPreference);
+                }}
+              />
+              <button
+                className="sc-icon-button sc-solid"
+                aria-label={t('addWaypoint')}
+                disabled={!waypointDraft.trim()}
+                onClick={() => addWaypoint(drivingPreference)}
+              >
+                <Plus size={17} />
+              </button>
+            </div>
+          </div>
+        )}
+        {!googleMode && editingMode === 'drive' && (
           <button className="sc-small-button sc-full-width" onClick={addDrivingRoute}>
             <Plus size={15} />
             {t('alternativeRoute')}
@@ -1338,135 +1692,117 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             ))}
           </details>
         )}
-        <p className="sc-help sc-return-note">
-          <Info size={13} />
-          {t('estimatedReturn')}
-        </p>
+        {props.googleApiKey && !googleMode && (
+          <div className="sc-manual-fallback">
+            <p>{t(!online ? 'offlineFallback' : 'manualFallback')}</p>
+            {googleError && (
+              <p className="sc-error" role="alert">
+                {googleError}
+              </p>
+            )}
+            <button className="sc-small-button" onClick={reconnectGoogle} disabled={!online}>
+              {t('reconnectGoogle')}
+            </button>
+          </div>
+        )}
+        {googleMode && (
+          <button className="sc-text-button" onClick={() => setManualRequested(true)}>
+            {t('useManualInputs')}
+          </button>
+        )}
+        {!googleMode && (
+          <p className="sc-help sc-return-note">
+            <Info size={13} />
+            {t('estimatedReturn')}
+          </p>
+        )}
       </div>
     </aside>
   );
 
   const renderSchematic = () => (
-    <section className="sc-map-panel" aria-label={t('schematic')}>
+    <section className="sc-map-panel" aria-label={t(googleMode ? 'googleMapTitle' : 'schematic')}>
       <div className="sc-map-toolbar">
         <span>
           <Compass size={17} />
-          {t('schematic')}
+          {t(googleMode ? 'googleMapTitle' : 'schematic')}
         </span>
         <span className="sc-tag">
-          <WifiOff size={12} />
-          {t('manualMode')}
+          {googleMode ? <MapPin size={12} /> : <WifiOff size={12} />}
+          {t(googleMode ? 'googleOnline' : 'manualMode')}
         </span>
       </div>
-      <div className="sc-schematic-canvas">
-        <div className="sc-map-contour contour-one" />
-        <div className="sc-map-contour contour-two" />
-        <div className="sc-map-contour contour-three" />
-        <div className="sc-diagram-line" />
-        <div className="sc-diagram-node sc-node-start">
-          <div className="sc-node-icon">
-            <House size={23} />
-          </div>
-          <div className="sc-node-label">
-            <span>{t('start')}</span>
-            <strong>{state.origin.label || '—'}</strong>
-          </div>
-        </div>
-        <div className="sc-diagram-node sc-node-hub">
-          <div className="sc-node-icon">
-            <TrainFront size={22} />
-          </div>
-          <div className="sc-node-label">
-            <span>{t('interchange')}</span>
-            <strong>
-              {state.options.find((option) => option.mode === 'hybrid')?.waypoints[0]?.label ||
-                t('hub')}
-            </strong>
-            <small>{t('hybrid')}</small>
-          </div>
-        </div>
-        <div className="sc-diagram-node sc-node-end">
-          <div className="sc-node-icon">
-            <MapPin size={24} />
-          </div>
-          <div className="sc-node-label">
-            <span>{t('finish')}</span>
-            <strong>{state.destination.label || '—'}</strong>
-          </div>
-        </div>
-        <span className="sc-schematic-note">{t('schematicNote')}</span>
-      </div>
-      <div className="sc-map-explainer">
-        <span className="sc-icon-tile">
-          <Leaf size={20} />
-        </span>
-        <div>
-          <h3>{t('manualMapTitle')}</h3>
-          <p>{t('manualMapBody')}</p>
-        </div>
-      </div>
-      <p className="sc-map-footnote">{t('mapFooter')}</p>
-      {props.googleApiKey && (
-        <div className="sc-google-controls">
-          <p>{t('googleSourceDescription')}</p>
-          <label className="sc-checkbox">
-            <input
-              type="checkbox"
-              checked={googleConsent}
-              onChange={(event) => setGoogleConsent(event.target.checked)}
-            />
-            <span>{t('googleConsent')}</span>
-          </label>
-          {(googleStatus === 'idle' || googleStatus === 'loading' || googleStatus === 'error') && (
-            <button
-              className="sc-small-button"
-              disabled={!googleConsent || googleStatus === 'loading'}
-              onClick={loadGoogle}
-            >
-              {t(googleStatus === 'loading' ? 'googleLoading' : 'enableMap')}
-            </button>
+      {googleMode && (
+        <div className="sc-map-stage">
+          <div
+            className="sc-google-map"
+            ref={googleMapRef}
+            aria-label={t('googleMapDescription')}
+          />
+          {(googleStatus === 'idle' || googleStatus === 'loading') && (
+            <div className="sc-map-loading" role="status">
+              {t('googleLoading')}
+            </div>
           )}
-          {googleStatus === 'ready' && (
-            <>
-              <button
-                className="sc-small-button"
-                onClick={() => void getGoogleRoutes('drive')}
-                disabled={!googleConsent || comparison.error}
-              >
-                {t('getGoogleRoutes')}
-              </button>
-              <button
-                className="sc-small-button"
-                onClick={() => void getGoogleRoutes('transit')}
-                disabled={!googleConsent || comparison.error}
-              >
-                {t('getGoogleTransit')}
-              </button>
-              {!addressSearchEnabled && (
-                <button
-                  className="sc-small-button"
-                  disabled={!googleConsent || addressSearchPending}
-                  onClick={() => void enableAddressSearch()}
-                >
-                  {t(addressSearchPending ? 'googleLoading' : 'enableAddressSearch')}
-                </button>
-              )}
-            </>
-          )}
-          {googleStatus === 'routes' && <p role="status">{t('googleRoutesLoading')}</p>}
-          {googleError && (
-            <p className="sc-error" role="alert">
-              {t('googleError')} {googleError}
+          {googleStatus === 'routes' && (
+            <p className="sc-help" role="status">
+              {t('googleRoutesLoading')}
             </p>
           )}
-          <small>{t('googleMetrics', { count: googleRequests })}</small>
         </div>
       )}
-      <div
-        className={`sc-google-map ${googleStatus === 'idle' ? 'sc-google-map-hidden' : ''}`}
-        ref={googleMapRef}
-        aria-label={t('googleMapDescription')}
-      />
+      {!googleMode && (
+        <>
+          <div className="sc-schematic-canvas">
+            <div className="sc-map-contour contour-one" />
+            <div className="sc-map-contour contour-two" />
+            <div className="sc-map-contour contour-three" />
+            <div className="sc-diagram-line" />
+            <div className="sc-diagram-node sc-node-start">
+              <div className="sc-node-icon">
+                <House size={23} />
+              </div>
+              <div className="sc-node-label">
+                <span>{t('start')}</span>
+                <strong>{state.origin.label || '—'}</strong>
+              </div>
+            </div>
+            <div className="sc-diagram-node sc-node-hub">
+              <div className="sc-node-icon">
+                <TrainFront size={22} />
+              </div>
+              <div className="sc-node-label">
+                <span>{t('interchange')}</span>
+                <strong>
+                  {state.options.find((option) => option.mode === 'hybrid')?.waypoints[0]?.label ||
+                    t('hub')}
+                </strong>
+                <small>{t('hybrid')}</small>
+              </div>
+            </div>
+            <div className="sc-diagram-node sc-node-end">
+              <div className="sc-node-icon">
+                <MapPin size={24} />
+              </div>
+              <div className="sc-node-label">
+                <span>{t('finish')}</span>
+                <strong>{state.destination.label || '—'}</strong>
+              </div>
+            </div>
+            <span className="sc-schematic-note">{t('schematicNote')}</span>
+          </div>
+          <div className="sc-map-explainer">
+            <span className="sc-icon-tile">
+              <Leaf size={20} />
+            </span>
+            <div>
+              <h3>{t('manualMapTitle')}</h3>
+              <p>{t('manualMapBody')}</p>
+            </div>
+          </div>
+          <p className="sc-map-footnote">{t('mapFooter')}</p>
+        </>
+      )}
     </section>
   );
 
@@ -1491,7 +1827,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       {!comparison.error && !comparison.result && (
         <div className="sc-empty-state">
           <Info size={26} />
-          <h3>{t(noComparableRoutesKey)}</h3>
+          <h3>{t(googleMode ? 'planRoutePrompt' : noComparableRoutesKey)}</h3>
         </div>
       )}
       {comparison.result?.results.map((result) => (
@@ -2094,7 +2430,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         </div>
         <div className="sc-header-actions">
           <span className="sc-status-dot" />
-          <span className="sc-header-status">{t('manualMode')}</span>
+          <span className="sc-header-status">{t(googleMode ? 'googleOnline' : 'manualMode')}</span>
           <select
             aria-label={t('language')}
             value={locale}
@@ -2203,13 +2539,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               </div>
               <span className="sc-intro-note">
                 <Leaf size={20} />
-                {t('offlineStatus')}
+                {t(googleMode ? 'googleOnline' : 'offlineStatus')}
               </span>
             </section>
             <div className="sc-demo-banner">
               <Info size={17} />
-              <p>{t('demoNotice')}</p>
-              <span className="sc-tag">{t('demoData')}</span>
+              <p>{t(googleMode ? 'livePlannerHint' : 'demoNotice')}</p>
+              <span className="sc-tag">{t(googleMode ? 'googleOnline' : 'demoData')}</span>
             </div>
             <div className="sc-workspace">
               {renderInputs()}
@@ -2278,7 +2614,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <Leaf size={13} />
           {t('footer')}
         </span>
-        <span>{t('offlineStatus')}</span>
+        <span>{t(googleMode ? 'googleDetails' : 'offlineStatus')}</span>
       </footer>
       {notice && (
         <div className="sc-toast" role="status">

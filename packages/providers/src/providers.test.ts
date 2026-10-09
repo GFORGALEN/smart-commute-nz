@@ -286,6 +286,103 @@ describe('Google adapter without external paid requests', () => {
     expect(onError).toHaveBeenCalledOnce();
     expect(container.childElementCount).toBe(0);
   });
+  it('keeps canonical address text synchronized without reporting external updates as user input', async () => {
+    const widget = Object.assign(document.createElement('div'), { value: '' });
+    const onInput = vi.fn();
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({
+        PlaceAutocompleteElement: vi.fn(function () {
+          return widget;
+        }),
+      }),
+    });
+    const container = document.createElement('div');
+    const control = await provider.attachAutocomplete(container, vi.fn(), undefined, {
+      initialValue: 'My saved origin',
+      onInput,
+      label: 'Origin',
+    });
+    expect(widget.value).toBe('My saved origin');
+    expect(widget.getAttribute('aria-label')).toBe('Origin');
+    control.setValue('My swapped destination');
+    expect(widget.value).toBe('My swapped destination');
+    expect(onInput).not.toHaveBeenCalled();
+    widget.value = 'New typed address';
+    widget.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    expect(onInput).toHaveBeenCalledWith('New typed address');
+    control();
+    widget.value = 'After cleanup';
+    widget.dispatchEvent(new Event('input'));
+    control.setValue('Ignored');
+    expect(onInput).toHaveBeenCalledOnce();
+    expect(widget.value).toBe('After cleanup');
+    expect(container.childElementCount).toBe(0);
+  });
+  it('does not overwrite a newer typed address when older Place details finish', async () => {
+    const widget = Object.assign(document.createElement('div'), { value: '' });
+    let completeDetails: () => void = () => undefined;
+    const place = {
+      formattedAddress: 'Old selected address',
+      location: { toJSON: () => ({ lat: -36.84, lng: 174.76 }) },
+      fetchFields: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeDetails = resolve;
+          }),
+      ),
+    };
+    const onSelect = vi.fn();
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({
+        PlaceAutocompleteElement: vi.fn(function () {
+          return widget;
+        }),
+      }),
+    });
+    const control = await provider.attachAutocomplete(document.createElement('div'), onSelect);
+    const select = Object.assign(new Event('gmp-select'), {
+      placePrediction: { toPlace: () => place },
+    });
+    widget.dispatchEvent(select);
+    widget.value = 'Newer typed address';
+    widget.dispatchEvent(new Event('input'));
+    completeDetails();
+    await Promise.resolve();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(widget.value).toBe('Newer typed address');
+    control();
+  });
+  it('sets selected formatted text and coordinates after the latest Place details resolve', async () => {
+    const widget = Object.assign(document.createElement('div'), { value: '' });
+    const place = {
+      formattedAddress: 'Selected New Zealand address',
+      location: { toJSON: () => ({ lat: -36.84, lng: 174.76 }) },
+      fetchFields: vi.fn().mockResolvedValue(undefined),
+    };
+    const onSelect = vi.fn();
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({
+        PlaceAutocompleteElement: vi.fn(function () {
+          return widget;
+        }),
+      }),
+    });
+    const control = await provider.attachAutocomplete(document.createElement('div'), onSelect);
+    widget.dispatchEvent(
+      Object.assign(new Event('gmp-select'), { placePrediction: { toPlace: () => place } }),
+    );
+    await Promise.resolve();
+    expect(widget.value).toBe('Selected New Zealand address');
+    expect(onSelect).toHaveBeenCalledWith({
+      label: 'Selected New Zealand address',
+      coordinates: { lat: -36.84, lng: 174.76 },
+    });
+    expect(place.fetchFields).toHaveBeenCalledWith({ fields: ['formattedAddress', 'location'] });
+    control();
+  });
   it('models walking and waiting, assigns one complete fare, and counts transfers', async () => {
     const { provider } = mockGoogle([
       [
@@ -394,6 +491,10 @@ describe('Google adapter without external paid requests', () => {
     const createPolylines = vi.fn().mockReturnValue([{ setMap }]);
     class TestMap {
       fitBounds = vi.fn();
+      addListener = vi.fn((_name: string, callback: () => void) => {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      });
     }
     const loadLibrary = vi.fn().mockImplementation(async (name: string) =>
       name === 'maps'
@@ -414,6 +515,162 @@ describe('Google adapter without external paid requests', () => {
     expect(setMap.mock.calls[0]?.[0]).toBeInstanceOf(TestMap);
     provider.dispose();
     expect(setMap).toHaveBeenLastCalledWith(null);
+  });
+  it('waits for the first map idle event before declaring the map ready', async () => {
+    let renderReady: (() => void) | undefined;
+    const remove = vi.fn();
+    class TestMap {
+      addListener(name: string, callback: () => void) {
+        expect(name).toBe('idle');
+        renderReady = callback;
+        return { remove };
+      }
+    }
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Map: TestMap }),
+    });
+    try {
+      const ready = provider.initializeMap(document.createElement('div'));
+      await vi.waitFor(() => expect(renderReady).toBeTypeOf('function'));
+      expect(provider.getMetrics().mapLoads).toBe(0);
+      renderReady?.();
+      await ready;
+      expect(provider.getMetrics().mapLoads).toBe(1);
+      expect(remove).toHaveBeenCalled();
+    } finally {
+      provider.dispose();
+    }
+  });
+  it('rejects authentication failures while the SDK is still loading', async () => {
+    const page = window as Window & { gm_authFailure?: () => void };
+    const previous = page.gm_authFailure;
+    const onError = vi.fn();
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: () => new Promise(() => undefined),
+    });
+    try {
+      const ready = provider.initializeMap(document.createElement('div'), onError);
+      page.gm_authFailure?.();
+      await expect(ready).rejects.toMatchObject({ code: 'REQUEST_DENIED' });
+      expect(onError).toHaveBeenCalledOnce();
+      expect(provider.getMetrics()).toMatchObject({ mapLoads: 0, lastError: 'REQUEST_DENIED' });
+      expect(page.gm_authFailure).toBe(previous);
+    } finally {
+      provider.dispose();
+      page.gm_authFailure = previous;
+    }
+  });
+  it('shares the authentication callback and preserves the previous integration across disposal', async () => {
+    const page = window as Window & { gm_authFailure?: () => void };
+    const original = page.gm_authFailure;
+    const previous = vi.fn();
+    page.gm_authFailure = previous;
+    class TestMap {
+      addListener(_name: string, callback: () => void) {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      }
+    }
+    const providerA = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Map: TestMap }),
+    });
+    const providerB = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Map: TestMap }),
+    });
+    const firstError = vi.fn();
+    const secondError = vi.fn();
+    try {
+      await Promise.all([
+        providerA.initializeMap(document.createElement('div'), firstError),
+        providerB.initializeMap(document.createElement('div'), secondError),
+      ]);
+      const callback = page.gm_authFailure;
+      callback?.();
+      expect(firstError).toHaveBeenCalledWith(expect.objectContaining({ code: 'REQUEST_DENIED' }));
+      expect(secondError).toHaveBeenCalledWith(expect.objectContaining({ code: 'REQUEST_DENIED' }));
+      expect(previous).toHaveBeenCalledOnce();
+      providerA.dispose();
+      expect(page.gm_authFailure).toBe(callback);
+      providerB.dispose();
+      expect(page.gm_authFailure).toBe(previous);
+    } finally {
+      providerA.dispose();
+      providerB.dispose();
+      page.gm_authFailure = original;
+    }
+  });
+  it('preserves a replacement global authentication handler installed by another integration', async () => {
+    const page = window as Window & { gm_authFailure?: () => void };
+    const original = page.gm_authFailure;
+    class TestMap {
+      addListener(_name: string, callback: () => void) {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      }
+    }
+    const previous = vi.fn();
+    page.gm_authFailure = previous;
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Map: TestMap }),
+    });
+    try {
+      await provider.initializeMap(document.createElement('div'));
+      const installed = page.gm_authFailure;
+      const replacement = vi.fn(() => installed?.());
+      page.gm_authFailure = replacement;
+      provider.dispose();
+      expect(page.gm_authFailure).toBe(replacement);
+      replacement();
+      expect(previous).toHaveBeenCalledOnce();
+    } finally {
+      provider.dispose();
+      page.gm_authFailure = original;
+    }
+  });
+  it('times out a blocked SDK load and permits offline fallback', async () => {
+    vi.useFakeTimers();
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: () => new Promise(() => undefined),
+    });
+    try {
+      const result = provider
+        .initializeMap(document.createElement('div'))
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(12000);
+      expect(await result).toMatchObject({ code: 'NETWORK_ERROR' });
+      expect(provider.getMetrics()).toMatchObject({ mapLoads: 0, lastError: 'NETWORK_ERROR' });
+    } finally {
+      provider.dispose();
+      vi.useRealTimers();
+    }
+  });
+  it('cancels pending map readiness and detaches listeners when disposed', async () => {
+    const remove = vi.fn();
+    const attached = vi.fn();
+    class TestMap {
+      addListener() {
+        attached();
+        return { remove };
+      }
+    }
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({ Map: TestMap }),
+    });
+    const result = provider
+      .initializeMap(document.createElement('div'))
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(attached).toHaveBeenCalled());
+    provider.dispose();
+    expect(await result).toMatchObject({ code: 'NETWORK_ERROR' });
+    expect(remove).toHaveBeenCalled();
+    expect(provider.getMetrics().mapLoads).toBe(0);
   });
   it('rejects past traffic-aware driving and out-of-range transit before requesting', async () => {
     const loadLibrary = vi.fn();

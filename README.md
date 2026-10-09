@@ -55,9 +55,11 @@ available offline.
 The initial scenario is **sample input, not a Google/AT lookup**: 4 Fong Road →
 Britomart, driving 19 km each way, park-and-ride driving 15 km each way, train
 fare NZ$4.90 and public transport fare NZ$6.50 each way, fuel 8.2 L/100 km at
-NZ$3.50/L, parking NZ$0. Durations are illustrative assumptions. Editing a location
-label does not automatically change distance or fare. Enter your own data or make
-an explicit Google lookup. Station parking legality and availability must be checked.
+NZ$3.50/L, parking NZ$0. Durations are illustrative assumptions. In Manual Mode,
+editing a location label does not change distance or fare. With Google available,
+select locations in the left-hand address fields and plan a route; later address
+or schedule changes refresh that route automatically. Station parking legality
+and availability must be checked.
 
 For those assumptions, full driving fuel is **NZ$5.453 one way / NZ$10.906 return**;
 hybrid fuel plus fare is **NZ$9.205 one way / NZ$18.410 return**; full transit is
@@ -75,18 +77,30 @@ VITE_GOOGLE_MAPS_API_KEY=your_restricted_browser_key
 ```
 
 A Vite environment value is visible to site visitors; it is not a secret. Restrict
-HTTP referrers and APIs, set quotas and billing alerts. No-key manual mode is default.
-Map initialization, Places and route lookup are explicit actions. Never enable
+HTTP referrers and APIs, set quotas and billing alerts. With a configured key and an
+online connection, Google Maps and address search load automatically. No-key or
+offline sessions use Manual Mode. The first route calculation uses the left-hand
+plan button; subsequent address, departure or return-time edits trigger a debounced
+refresh. Fuel, parking, tolls and other cost changes recalculate locally without a
+route request. Google distance and duration appear in the same journey editor and
+the selected route is drawn on the main map. The planner uses traffic-aware driving
+with the higher-priced Routes Pro SKU so departure times affect the route estimate.
+Never enable
 billing or purchase a service without the account owner's consent. No paid service
 was enabled by this project. A limited, owner-authorized live check on 9 October 2026
 verified map loading, driving alternatives, address search and geocoding. Transit
 returned routes but incomplete NZD fare information, so the app requires manual
-pricing or verified AT estimates. Broader coverage, traffic-aware routing and return
-alternatives still need live verification. The public demo uses an owner-authorized
+pricing or verified AT estimates. A further bounded check verified automatic map
+loading, traffic-aware one-way driving, destination-triggered route refresh and
+immediate fuel-cost changes without another route request. Broader coverage and
+return alternatives still need live verification. The public demo uses an owner-authorized
 browser key supplied through the GitHub Actions repository secret
 `VITE_GOOGLE_MAPS_API_KEY` during the final deployment build; the local `.env.local`
 is not committed. Browser users can inspect the built key, so Google Cloud referrer/API
-restrictions remain necessary. Google features require explicit user activation.
+restrictions remain necessary. Opening the online planner loads Google services
+automatically and can generate billable events; route planning and follow-up refreshes
+can generate additional requests. Initialization or route errors leave Manual Mode
+available, and unavailable transit prices require manual fares or verified AT estimates.
 
 ## Reuse as a component or widget
 
@@ -204,7 +218,9 @@ deployment should use `/`. Local Vite defaults to `/`; do not commit a real `.en
 ## Privacy, data and license
 
 Preferences and user-entered places/routes stay in this browser's localStorage.
-Google lookup sends entered locations to Google when explicitly invoked. Google
+With a configured key, online startup loads Google Maps and address search. Address
+search and route planning send entered locations to Google; after the first route
+query, changing locations or schedules refreshes it automatically. Google
 route content is transient and not saved into the offline shell or user preferences.
 The page has no analytics, authentication, server database or LLM calls.
 

@@ -10,16 +10,21 @@ Verified / implemented: 2026-10-09 (Asia/Shanghai).
    dated fare rules; React owns presentation and local preferences. No circular imports.
 3. **Honest data.** The provided Fong Road/Britomart scenario is an offline fixture.
    Its distances, times, prices and parking values are assumptions. Changing place
-   labels does not change those numbers. Live lookup is a separate explicit action.
+   labels in Manual Mode does not change those numbers. The first live route query
+   uses the plan button; later address/schedule changes refresh that query with a
+   debounce. Google distance and duration feed the journey editor and cost engine.
 4. **Return journeys are independent.** Distances, consumption, tolls, fares, transfer
    counts and minutes are separate for each direction. A daily parking charge is
    included once; users enter the total for their intended parking duration.
 5. **Money vs decision score.** Currency is NZD. Intermediate arithmetic is not
    rounded; display rounds to cents. Optional maintenance is shown separately. The
    time-value score is an explanatory decision metric, not a payable price.
-6. **No hidden map expense.** No key means manual mode. Browser API keys are public
-   credentials, requiring referrer/API restrictions and billing alerts. Map calls are
-   tied to buttons; no runtime billing setup is automated. Google routes are displayed
+6. **Google first when configured.** No key or offline means manual mode. A configured
+   key starts the Google map and Places widgets automatically when online. Route
+   planning begins with a button, then address/time changes refresh after a debounce.
+   Planner driving uses traffic-aware estimates (Routes Pro); fuel and price changes
+   only recalculate local costs. Browser keys require referrer/API restrictions and
+   billing alerts; no runtime billing setup is automated. Google routes are displayed
    only on a Google basemap and are not written to localStorage or the offline cache.
 7. **Data licensing is not inferred.** GTFS and GIS catalogs are documented but not
    bulk-downloaded or redistributed. Station parking remains user-verified. A GIS

@@ -60,7 +60,44 @@ export interface GoogleRouteProviderOptions {
   maxRouteRequests?: number;
 }
 
+export interface GoogleAutocompleteOptions {
+  initialValue?: string;
+  onInput?: (value: string) => void;
+  label?: string;
+}
+
+/** Callable cleanup retains compatibility with integrations that only dispose it. */
+export type GoogleAutocompleteControl = (() => void) & { setValue(value: string): void };
+
 let configuredKey: string | undefined;
+type MapsAuthenticationWindow = Window & { gm_authFailure?: () => void };
+const authenticationListeners = new Set<() => void>();
+let previousAuthenticationCallback: (() => void) | undefined;
+let authenticationCallback: (() => void) | undefined;
+
+/** Google exposes authentication failures through a page-level callback. */
+function watchAuthenticationFailure(listener: () => void): () => void {
+  const page = window as MapsAuthenticationWindow;
+  if (authenticationListeners.size === 0) {
+    previousAuthenticationCallback = page.gm_authFailure;
+    const previous = previousAuthenticationCallback;
+    authenticationCallback = () => {
+      for (const notify of [...authenticationListeners]) notify();
+      previous?.();
+    };
+    page.gm_authFailure = authenticationCallback;
+  }
+  authenticationListeners.add(listener);
+  return () => {
+    authenticationListeners.delete(listener);
+    if (authenticationListeners.size === 0) {
+      if (page.gm_authFailure === authenticationCallback)
+        page.gm_authFailure = previousAuthenticationCallback;
+      authenticationCallback = undefined;
+      previousAuthenticationCallback = undefined;
+    }
+  };
+}
 
 function nonnegative(value: number | undefined): value is number {
   return value !== undefined && Number.isFinite(value) && value >= 0;
@@ -159,6 +196,7 @@ export class GoogleRouteProvider implements RouteProvider {
   private sdkLoad?: Promise<void>;
   private busy = false;
   private map?: google.maps.Map;
+  private mapLifecycleCleanup?: () => void;
   private polylines: google.maps.Polyline[] = [];
   private sdkRoutes = new Map<string, GoogleRouteData>();
   private computationWarnings: string[] = [];
@@ -202,19 +240,85 @@ export class GoogleRouteProvider implements RouteProvider {
     return importLibrary(name);
   }
 
-  async initializeMap(element: HTMLElement): Promise<void> {
+  async initializeMap(
+    element: HTMLElement,
+    onError?: (error: RouteProviderError) => void,
+  ): Promise<void> {
+    this.mapLifecycleCleanup?.();
+    let ready = false;
+    let failed = false;
+    let readinessListener: google.maps.MapsEventListener | undefined;
+    let rejectFailure: (error: RouteProviderError) => void = () => undefined;
+    const failure = new Promise<never>((_resolve, reject) => {
+      rejectFailure = reject;
+    });
+    const fail = (error: RouteProviderError) => {
+      if (failed) return;
+      failed = true;
+      this.metrics.lastError = error.code;
+      this.clearMapRoutes();
+      this.map = undefined;
+      rejectFailure(error);
+      onError?.(error);
+    };
+    const stopWatching = watchAuthenticationFailure(() =>
+      fail(
+        new RouteProviderError(
+          'REQUEST_DENIED',
+          'Google could not authenticate the map. Check key restrictions and enabled APIs. Continue with Manual Mode.',
+        ),
+      ),
+    );
+    // A blocked SDK script or first map render must not leave the planner loading forever.
+    const deadline = window.setTimeout(
+      () =>
+        fail(
+          new RouteProviderError(
+            'NETWORK_ERROR',
+            'Google Maps did not finish loading. Check connectivity or continue with Manual Mode.',
+          ),
+        ),
+      12000,
+    );
+    const cleanup = () => {
+      stopWatching();
+      readinessListener?.remove();
+      window.clearTimeout(deadline);
+      if (!ready && !failed) {
+        failed = true;
+        rejectFailure(new RouteProviderError('NETWORK_ERROR', 'The map was closed while loading.'));
+      }
+    };
+    this.mapLifecycleCleanup = cleanup;
     try {
-      const maps = (await this.load('maps')) as google.maps.MapsLibrary;
-      this.map = new maps.Map(element, {
+      const maps = (await Promise.race([this.load('maps'), failure])) as google.maps.MapsLibrary;
+      const map = new maps.Map(element, {
         center: { lat: -36.8485, lng: 174.7633 },
         zoom: 11,
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: true,
       });
+      if (failed) await failure;
+      this.map = map;
+      const firstRender = new Promise<void>((resolve) => {
+        readinessListener = map.addListener('idle', resolve);
+      });
+      await Promise.race([firstRender, failure]);
+      ready = true;
+      readinessListener?.remove();
+      window.clearTimeout(deadline);
       this.metrics.mapLoads += 1;
     } catch (error) {
-      throw readableError(error);
+      cleanup();
+      const readable = readableError(error);
+      if (this.mapLifecycleCleanup === cleanup) {
+        this.mapLifecycleCleanup = undefined;
+        this.clearMapRoutes();
+        this.map = undefined;
+        this.metrics.lastError = readable.code;
+      }
+      throw readable;
     }
   }
 
@@ -222,12 +326,21 @@ export class GoogleRouteProvider implements RouteProvider {
     element: HTMLElement,
     onSelect: (location: Location) => void,
     onError?: (error: RouteProviderError) => void,
-  ): Promise<() => void> {
+    options: GoogleAutocompleteOptions = {},
+  ): Promise<GoogleAutocompleteControl> {
     const places = (await this.load('places')) as google.maps.PlacesLibrary;
     const widget = new places.PlaceAutocompleteElement({ includedRegionCodes: ['nz'] });
     let active = true;
-    widget.setAttribute('aria-label', 'Search a New Zealand address');
+    let revision = 0;
+    widget.value = options.initialValue ?? '';
+    widget.setAttribute('aria-label', options.label ?? 'Search a New Zealand address');
+    const inputListener = () => {
+      if (!active) return;
+      revision += 1;
+      options.onInput?.(widget.value);
+    };
     const listener = (event: Event) => {
+      const selectedRevision = ++revision;
       void (async () => {
         try {
           const { placePrediction } = event as google.maps.places.PlacePredictionSelectEvent;
@@ -240,10 +353,13 @@ export class GoogleRouteProvider implements RouteProvider {
               'INCOMPLETE_RESULT',
               'The selected address has no coordinates. Enter latitude and longitude manually.',
             );
-          if (active)
-            onSelect({ label: place.formattedAddress ?? '', coordinates: place.location.toJSON() });
+          if (active && selectedRevision === revision) {
+            const label = place.formattedAddress ?? widget.value;
+            widget.value = label;
+            onSelect({ label, coordinates: place.location.toJSON() });
+          }
         } catch (error) {
-          if (active) onError?.(readableError(error));
+          if (active && selectedRevision === revision) onError?.(readableError(error));
         }
       })();
     };
@@ -256,13 +372,22 @@ export class GoogleRouteProvider implements RouteProvider {
       );
     widget.addEventListener('gmp-select', listener);
     widget.addEventListener('gmp-error', errorListener);
+    widget.addEventListener('input', inputListener);
     element.appendChild(widget);
-    return () => {
+    const cleanup = () => {
       active = false;
       widget.removeEventListener('gmp-select', listener);
       widget.removeEventListener('gmp-error', errorListener);
+      widget.removeEventListener('input', inputListener);
       widget.remove();
     };
+    return Object.assign(cleanup, {
+      setValue(value: string) {
+        if (!active || widget.value === value) return;
+        revision += 1;
+        widget.value = value;
+      },
+    });
   }
 
   async geocode(location: Location): Promise<Location> {
@@ -298,6 +423,8 @@ export class GoogleRouteProvider implements RouteProvider {
   }
 
   dispose(): void {
+    this.mapLifecycleCleanup?.();
+    this.mapLifecycleCleanup = undefined;
     this.clearMapRoutes();
     this.sdkRoutes.clear();
     this.map = undefined;

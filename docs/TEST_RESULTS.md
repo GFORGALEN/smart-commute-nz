@@ -10,7 +10,7 @@ live follow-up is described below.
 | `npm run format:check`                      | Passed                                                     |
 | `npm run lint`                              | Passed, no warnings                                        |
 | `npm run typecheck`                         | Passed, strict TypeScript                                  |
-| `npm run test`                              | **125 passed** across four files                           |
+| `npm run test`                              | **145 passed** across four files                           |
 | Production app and independent widget build | Passed with `/smart-commute-nz/` base                      |
 | Development Playwright                      | **20 passed**, four production-only cases skipped          |
 | Production Playwright                       | **24 passed**, no skipped cases                            |
@@ -25,14 +25,25 @@ simultaneous independent widgets, including uniqueness of document element IDs.
 - **39 core tests:** fuel formula, zero and invalid inputs, separate outward/return
   legs, parking once, fares, tolls, maintenance, changing prices/consumption,
   weekly/monthly projections, time value and deterministic ranking.
-- **39 provider tests:** current SDK request shapes via injected test fixtures,
+- **48 provider tests:** current SDK request shapes via injected test fixtures,
   missing keys, quota and API errors, separate return requests, transit fare
   completeness, top-level SDK field masks, structured SDK/RPC error handling,
-  sanitized error messages, manual input validation and dated AT fare rules.
-- **25 planner tests:** editable costs, persistence, callback/host props, bilingual
+  sanitized error messages, synchronized autocomplete text and selection races,
+  first-map-idle readiness, authentication failure handling, SDK timeouts, cleanup,
+  manual input validation and dated AT fare rules.
+- **36 planner tests:** editable costs, persistence, callback/host props, bilingual
   UI, Google failure/attribution, transient Google data, stale async query rejection,
   incomplete returns, stale AT fare exclusion, manual fare recovery and parking
-  acknowledgment reset.
+  acknowledgment reset. Google-first cases cover automatic map/address initialization,
+  one map initialization in StrictMode and across tab changes, unified address
+  selection/swap/host updates, read-only route measurements, local fuel/consumption/
+  parking/toll recalculation without another route request, offline fallback and
+  reconnection that preserves costs. Address changes after the first explicit query
+  remove stale results and debounce for 800 ms; obsolete in-flight results are
+  discarded and a current refresh is queued without overlapping requests.
+  Google transit geometry stays read-only while fares remain editable. Offline
+  parking/toll edits propagate to existing live routes on reconnection, and late
+  authentication failures are not overwritten by an in-flight route response.
 - **22 AT helper tests:** verified zones, concession eligibility, Auckland tag-on
   time, independent return times, transfer windows, explicit ride segments, changed
   endpoints, malformed durations and reapplication after context changes.
@@ -99,15 +110,26 @@ Google supplies a transit fare only when it knows fares for every transit step; 
 
 These limited live calls were separate from automated tests and may produce billable
 events. They do not establish availability for other journeys, schedules or deployment
-referrers. Traffic-aware driving and Google return alternatives were not live tested.
+referrers. That initial check did not include traffic-aware driving or Google return alternatives.
 No live response was bundled as sample input, and the local key was not committed.
+
+A separate check of the updated Google-first flow on **9 October 2026** verified
+automatic map loading and the real address inputs. One explicit, traffic-aware
+driving query returned routes; changing the destination then refreshed the route
+automatically with one further query. Changing fuel price updated the displayed
+cost immediately without increasing the route request count. This follow-up used
+two one-way route queries per scenario and does not establish broader traffic-aware
+coverage or Google return-route behavior. A 393 px mobile check found no horizontal
+overflow. Disconnecting switched to editable manual inputs while preserving the
+edited fuel price; reconnecting restored the Google map. This final smoke
+check reported no console or uncaught page errors.
 
 ## Practical limits
 
 The browser projects use Chromium desktop and a Pixel 7 mobile profile. Safari,
 Firefox, physical devices and screen-reader compatibility have not been certified.
 Google mocks are test fixtures and never appear as product route data. Live Google
-verification is limited to the Auckland scenario above. Wider routing coverage,
+verification is limited to the Auckland checks above. Wider routing coverage,
 deployment-specific referrer restrictions and ongoing billing configuration require
 the account owner's review.
 

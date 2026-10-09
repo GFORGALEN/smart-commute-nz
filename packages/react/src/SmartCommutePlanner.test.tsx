@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { StrictMode } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmartCommutePlanner } from './SmartCommutePlanner';
 import {
   createExampleOptions,
@@ -14,6 +15,7 @@ const google = vi.hoisted(() => ({
   renderRoute: vi.fn(),
   dispose: vi.fn(),
   attachAutocomplete: vi.fn(),
+  clearMapRoutes: vi.fn(),
 }));
 vi.mock('@smart-commute/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@smart-commute/providers')>()),
@@ -21,7 +23,7 @@ vi.mock('@smart-commute/providers', async (importOriginal) => ({
     initializeMap = google.initializeMap;
     getRoutes = google.getRoutes;
     renderRoute = google.renderRoute;
-    clearMapRoutes = vi.fn();
+    clearMapRoutes = google.clearMapRoutes;
     dispose = google.dispose;
     attachAutocomplete = google.attachAutocomplete;
     getMetrics = () => ({ routeRequests: 1 });
@@ -29,6 +31,56 @@ vi.mock('@smart-commute/providers', async (importOriginal) => ({
 }));
 
 const defaultProps = { destination: 'Britomart, Auckland' };
+const autocompleteSelectors: ((place: Location) => void)[] = [];
+function liveResponse(id = 'google-drive-test', roundTrip = false) {
+  return {
+    routes: [
+      {
+        id,
+        name: 'Google driving route',
+        mode: 'drive' as const,
+        outbound: [
+          {
+            mode: 'drive' as const,
+            distanceKm: 10,
+            durationMinutes: 20,
+            source: 'google' as const,
+            estimated: true,
+          },
+        ],
+        inbound: roundTrip
+          ? [
+              {
+                mode: 'drive' as const,
+                distanceKm: 11,
+                durationMinutes: 22,
+                source: 'google' as const,
+                estimated: true,
+              },
+            ]
+          : [],
+        parkingCost: 0,
+        waypoints: [],
+      },
+    ],
+    warnings: ['Traffic is not included in these durations.'],
+    attribution: 'Google Maps',
+    attributionLinks: [{ label: 'Transit agency', url: 'https://at.govt.nz/' }],
+    requestCount: 1,
+  };
+}
+async function renderGooglePlanner() {
+  const result = render(
+    <SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />,
+  );
+  await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled());
+  return result;
+}
+const useOneWay = () =>
+  fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
+const planRoute = () => fireEvent.click(screen.getByRole('button', { name: 'Plan route' }));
 const goTo = (name: string) => fireEvent.click(screen.getByRole('tab', { name }));
 const changeNumber = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label, { exact: true }), { target: { value } });
@@ -64,7 +116,41 @@ function prepareATTransit(supergold = false) {
 beforeEach(() => {
   localStorage.clear();
   vi.clearAllMocks();
-  google.initializeMap.mockResolvedValue(undefined);
+  vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+  autocompleteSelectors.length = 0;
+  google.initializeMap.mockReset().mockResolvedValue(undefined);
+  google.getRoutes.mockReset().mockResolvedValue(liveResponse());
+  google.attachAutocomplete
+    .mockReset()
+    .mockImplementation(
+      async (
+        element: HTMLElement,
+        onSelect: (location: Location) => void,
+        _onError: (error: unknown) => void,
+        options: { initialValue: string; label: string; onInput: (value: string) => void },
+      ) => {
+        autocompleteSelectors.push(onSelect);
+        const input = document.createElement('input');
+        input.setAttribute('aria-label', options.label);
+        input.value = options.initialValue;
+        input.addEventListener('input', () => options.onInput(input.value));
+        element.replaceChildren(input);
+        const cleanup = Object.assign(
+          vi.fn(() => input.remove()),
+          {
+            setValue: vi.fn((value: string) => {
+              input.value = value;
+            }),
+          },
+        );
+        return cleanup;
+      },
+    );
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('SmartCommutePlanner offline workflows', () => {
@@ -360,69 +446,69 @@ describe('SmartCommutePlanner offline workflows', () => {
 });
 
 describe('optional Google provider safeguards', () => {
-  it('shows a readable API failure only after explicit billing consent and map action', async () => {
-    google.initializeMap.mockRejectedValueOnce(new Error('Quota exceeded'));
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    expect(google.initializeMap).not.toHaveBeenCalled();
-    const loadButton = screen.getByRole('button', { name: 'Load Google map' });
-    expect(loadButton).toBeDisabled();
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
+  it('initializes one map and one pair of address widgets in StrictMode, including a tab return', async () => {
+    render(
+      <StrictMode>
+        <SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />
+      </StrictMode>,
     );
-    fireEvent.click(loadButton);
-    await waitFor(() =>
-      expect(screen.getByRole('alert')).toHaveTextContent('Google Maps request failed'),
-    );
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled());
+    expect(screen.getAllByLabelText('Starting point', { exact: true })).toHaveLength(1);
+    expect(screen.getAllByLabelText('Destination', { exact: true })).toHaveLength(1);
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    expect(google.dispose).not.toHaveBeenCalled();
+    const mapElement = google.initializeMap.mock.calls[0]![0] as HTMLElement;
+    goTo('Comparison');
+    goTo('Planner');
+    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(4));
+    expect(mapElement.isConnected).toBe(true);
+    expect(google.initializeMap).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByLabelText('Starting point', { exact: true })).toHaveLength(1);
+    expect(screen.getAllByLabelText('Destination', { exact: true })).toHaveLength(1);
     expect(google.getRoutes).not.toHaveBeenCalled();
   });
 
-  it('never caches Google-derived geometry even when users edit every live leg', async () => {
-    google.getRoutes.mockResolvedValueOnce({
-      routes: [
-        {
-          id: 'google-drive-test',
-          name: 'Google driving route',
-          mode: 'drive',
-          outbound: [
-            {
-              mode: 'drive',
-              distanceKm: 99,
-              durationMinutes: 99,
-              source: 'google',
-              estimated: true,
-            },
-          ],
-          inbound: [
-            {
-              mode: 'drive',
-              distanceKm: 100,
-              durationMinutes: 100,
-              source: 'google',
-              estimated: true,
-            },
-          ],
-          parkingCost: 0,
-          waypoints: [],
-        },
-      ],
-      warnings: ['Traffic is not included in these durations.'],
-      attribution: 'Google Maps',
-      attributionLinks: [{ label: 'Transit agency', url: 'https://at.govt.nz/' }],
-      requestCount: 1,
-    });
+  it('loads the map and both primary address inputs automatically without requesting a route', async () => {
+    await renderGooglePlanner();
+    expect(screen.queryByRole('button', { name: 'Load Google map' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Enable Google address search' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/I understand Google Maps and route requests may incur charges/),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText('Starting point', { exact: true })).toHaveLength(1);
+    expect(screen.getAllByLabelText('Destination', { exact: true })).toHaveLength(1);
+    expect(screen.getByLabelText('Starting point', { exact: true })).toHaveValue(
+      '4 Fong Road, Auckland',
+    );
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue(
+      defaultProps.destination,
+    );
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
+    expect(google.getRoutes).not.toHaveBeenCalled();
+  });
+
+  it('falls back to editable manual assumptions after a map failure and allows reconnection', async () => {
+    google.initializeMap.mockRejectedValueOnce(new Error('Quota exceeded'));
     render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Load Google map' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Request Google driving routes' })).toBeVisible(),
-    );
-    fireEvent.change(screen.getByLabelText('Return time', { exact: true }), {
-      target: { value: '2026-10-10T17:00' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Request Google driving routes' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Quota exceeded'));
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByLabelText('Outbound distance (km)', { exact: true })).toBeEnabled();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Reconnect Google map' }));
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
+    expect(google.getRoutes).not.toHaveBeenCalled();
+  });
+
+  it('keeps Google distances read-only and never stores geometry when its cost assumptions change', async () => {
+    google.getRoutes.mockResolvedValueOnce(liveResponse('google-drive-test', true));
+    await renderGooglePlanner();
+    planRoute();
     await waitFor(() =>
       expect(screen.getByTestId('route-editor-google-drive-test')).toBeInTheDocument(),
     );
@@ -432,12 +518,13 @@ describe('optional Google provider safeguards', () => {
       'https://at.govt.nz/',
     );
     const editor = screen.getByTestId('route-editor-google-drive-test');
-    fireEvent.change(within(editor).getByLabelText('Outbound travel time (min)', { exact: true }), {
-      target: { value: '88' },
+    const outboundTime = within(editor).getByLabelText('Outbound travel time (min)', {
+      exact: true,
     });
-    fireEvent.change(within(editor).getByLabelText('Return travel time (min)', { exact: true }), {
-      target: { value: '89' },
-    });
+    const outboundDistance = within(editor).getByLabelText(/Outbound distance \(km\)/);
+    expect(outboundTime).toHaveAttribute('readonly');
+    expect(outboundDistance).toHaveAttribute('readonly');
+    changeNumber('Parking per commute (NZ$)', '3');
     const stored = JSON.parse(localStorage.getItem('smart-commute-nz:v1')!) as {
       options: { id: string }[];
       savedRoutes: unknown[];
@@ -446,45 +533,24 @@ describe('optional Google provider safeguards', () => {
     expect(
       within(editor).queryByRole('button', { name: 'Save this route' }),
     ).not.toBeInTheDocument();
+    expect(within(editor).queryByRole('button', { name: 'Remove route' })).not.toBeInTheDocument();
   });
 
   it('keeps the initialized map DOM across tabs without another billed initialization', async () => {
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Load Google map' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Request Google driving routes' })).toBeVisible(),
-    );
+    await renderGooglePlanner();
     const mapElement = google.initializeMap.mock.calls[0]![0] as HTMLElement;
     goTo('Comparison');
     goTo('Planner');
+    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(4));
     expect(mapElement.isConnected).toBe(true);
     expect(google.initializeMap).toHaveBeenCalledTimes(1);
     expect(google.getRoutes).not.toHaveBeenCalled();
   });
 
   it('does not persist Google Places content or allow saving it as a manual place', async () => {
-    const selectors: ((place: Location) => void)[] = [];
-    google.attachAutocomplete.mockImplementation(
-      async (_element: HTMLElement, onSelect: (location: Location) => void) => {
-        selectors.push(onSelect);
-        return vi.fn();
-      },
-    );
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Load Google map' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Enable Google address search' })).toBeVisible(),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Enable Google address search' }));
-    await waitFor(() => expect(selectors).toHaveLength(2));
+    await renderGooglePlanner();
     act(() =>
-      selectors[0]!({
+      autocompleteSelectors[0]!({
         label: 'Google supplied address',
         coordinates: { lat: -36.85, lng: 174.75 },
       }),
@@ -499,27 +565,290 @@ describe('optional Google provider safeguards', () => {
 
   it('sends an explicit transit lookup with no driving waypoints', async () => {
     google.getRoutes.mockRejectedValueOnce(new Error('No complete NZD fare was returned.'));
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Load Google map' }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: 'Request Google public transport routes' }),
-      ).toBeVisible(),
-    );
-    fireEvent.change(screen.getByLabelText('Return time', { exact: true }), {
-      target: { value: '2026-10-10T17:00' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Request Google public transport routes' }));
+    await renderGooglePlanner();
+    useOneWay();
+    fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
+    planRoute();
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent('No complete NZD fare'),
     );
     expect(google.getRoutes).toHaveBeenCalledWith(
       expect.objectContaining({ mode: 'transit', waypoints: [] }),
     );
-    expect(screen.getByTestId('cost-transit')).toHaveTextContent('13.00');
+    expect(screen.queryByTestId('cost-transit')).not.toBeInTheDocument();
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
+  });
+
+  it('keeps Google transit geometry read-only while manual fare changes update cost without another route request', async () => {
+    const response = liveResponse('google-transit');
+    google.getRoutes.mockResolvedValueOnce({
+      ...response,
+      routes: [
+        {
+          ...response.routes[0],
+          name: 'Google public transport route',
+          mode: 'transit',
+          outbound: [
+            {
+              mode: 'bus',
+              durationMinutes: 25,
+              distanceKm: 10,
+              fare: 6.5,
+              transfers: 1,
+              source: 'google',
+              estimated: true,
+            },
+          ],
+        },
+      ],
+    });
+    await renderGooglePlanner();
+    useOneWay();
+    fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByTestId('cost-google-transit')).toHaveTextContent('6.50'),
+    );
+    const editor = screen.getByTestId('route-editor-google-transit');
+    expect(within(editor).getByLabelText('Segment type', { exact: true })).toHaveAttribute(
+      'readonly',
+    );
+    expect(within(editor).getByLabelText('Bus time (min)', { exact: true })).toHaveAttribute(
+      'readonly',
+    );
+    expect(within(editor).getByLabelText('Transfers', { exact: true })).toHaveAttribute('readonly');
+    expect(within(editor).queryByRole('combobox')).not.toBeInTheDocument();
+    expect(
+      within(editor).queryByRole('button', { name: 'Remove segment' }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(editor).queryByRole('button', { name: 'Add transit segment' }),
+    ).not.toBeInTheDocument();
+    const fare = within(editor).getByLabelText('Public transport fare — outbound', { exact: true });
+    expect(fare).toBeEnabled();
+    expect(fare).not.toHaveAttribute('readonly');
+    vi.useFakeTimers();
+    fireEvent.change(fare, { target: { value: '3' } });
+    expect(screen.getByTestId('cost-google-transit')).toHaveTextContent('3.00');
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('route-card-transit')).not.toBeInTheDocument();
+  });
+
+  it('synchronizes selected Places, swapped endpoints and host updates with the primary address inputs', async () => {
+    const { rerender } = await renderGooglePlanner();
+    const origin = {
+      label: 'Selected home, Auckland',
+      coordinates: { lat: -36.9, lng: 174.8 },
+    };
+    const destination = {
+      label: 'Selected work, Auckland',
+      coordinates: { lat: -36.85, lng: 174.75 },
+    };
+    act(() => {
+      autocompleteSelectors[0]!(origin);
+      autocompleteSelectors[1]!(destination);
+    });
+    expect(screen.getByLabelText('Starting point', { exact: true })).toHaveValue(origin.label);
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue(destination.label);
+    useOneWay();
+    planRoute();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ origin, destination }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Swap origin and destination' }));
+    expect(screen.getByLabelText('Starting point', { exact: true })).toHaveValue(destination.label);
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue(origin.label);
+    rerender(
+      <SmartCommutePlanner
+        origin="Host supplied home"
+        destination="Host supplied work"
+        googleApiKey="restricted-test-key"
+      />,
+    );
+    expect(screen.getByLabelText('Starting point', { exact: true })).toHaveValue(
+      'Host supplied home',
+    );
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue('Host supplied work');
+    expect(google.attachAutocomplete).toHaveBeenCalledTimes(2);
+  });
+
+  it('recalculates the live route cost as fuel, consumption, parking and tolls change without another route request', async () => {
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('2.87'),
+    );
+    vi.useFakeTimers();
+    changeNumber('Fuel price (NZ$/L)', '5');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('4.10');
+    changeNumber('Fuel consumption (L/100km)', '10');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('5.00');
+    changeNumber('Parking per commute (NZ$)', '3');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('8.00');
+    changeNumber('Outbound tolls (NZ$)', '2');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('10.00');
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('route-card-drive')).not.toBeInTheDocument();
+  });
+
+  it('removes stale results immediately and debounces repeated endpoint edits into one current request', async () => {
+    google.getRoutes
+      .mockResolvedValueOnce(liveResponse('google-original'))
+      .mockResolvedValueOnce(liveResponse('google-updated'));
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByTestId('route-card-google-original')).toBeInTheDocument(),
+    );
+    vi.useFakeTimers();
+    fireEvent.input(screen.getByLabelText('Destination', { exact: true }), {
+      target: { value: 'New' },
+    });
+    expect(screen.queryByTestId('route-card-google-original')).not.toBeInTheDocument();
+    expect(google.clearMapRoutes).toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    fireEvent.input(screen.getByLabelText('Destination', { exact: true }), {
+      target: { value: 'Newmarket, Auckland' },
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(799));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(google.getRoutes).toHaveBeenCalledTimes(2);
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ destination: { label: 'Newmarket, Auckland' } }),
+    );
+    expect(screen.getByTestId('route-card-google-updated')).toBeInTheDocument();
+    expect(screen.queryByTestId('route-card-drive')).not.toBeInTheDocument();
+  });
+
+  it('uses manual input while offline and reconnects without replacing cost preferences or initializing a second map', async () => {
+    await renderGooglePlanner();
+    changeNumber('Fuel price (NZ$/L)', '5');
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    fireEvent(window, new Event('offline'));
+    expect(
+      screen.getByText('You are offline. Manual calculation remains available.'),
+    ).toBeVisible();
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('15.58');
+    expect(screen.getByLabelText('Fuel price (NZ$/L)', { exact: true })).toHaveValue(5);
+    fireEvent.change(screen.getByLabelText('Destination', { exact: true }), {
+      target: { value: 'Entered offline' },
+    });
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    fireEvent(window, new Event('online'));
+    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(4));
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue('Entered offline');
+    expect(screen.getByLabelText('Fuel price (NZ$/L)', { exact: true })).toHaveValue(5);
+    expect(google.initializeMap).toHaveBeenCalledTimes(1);
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
+    expect(screen.getAllByLabelText('Destination', { exact: true })).toHaveLength(1);
+  });
+
+  it('starts in manual mode without loading Google when the browser is already offline', () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    expect(google.initializeMap).not.toHaveBeenCalled();
+    expect(google.attachAutocomplete).not.toHaveBeenCalled();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    fireEvent.change(screen.getByLabelText('Destination', { exact: true }), {
+      target: { value: 'Manual offline destination' },
+    });
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue(
+      'Manual offline destination',
+    );
+  });
+
+  it('preserves updated manual parking and toll costs when an existing Google route returns online', async () => {
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('2.87'),
+    );
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    fireEvent(window, new Event('offline'));
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    changeNumber('Parking per commute (NZ$)', '4');
+    changeNumber('Outbound tolls (NZ$)', '2');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('11.45');
+    vi.useFakeTimers();
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
+    fireEvent(window, new Event('online'));
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('8.87');
+    expect(google.initializeMap).toHaveBeenCalledTimes(1);
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('route-card-drive')).not.toBeInTheDocument();
+  });
+
+  it('retains manual fallback when a late Google authorization failure invalidates an in-flight route request', async () => {
+    let failMap!: (error: Error) => void;
+    let finish!: (response: ReturnType<typeof liveResponse>) => void;
+    google.initializeMap.mockImplementationOnce(
+      async (_element: HTMLElement, onError: (error: Error) => void) => {
+        failMap = onError;
+      },
+    );
+    google.getRoutes.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    act(() => failMap(new Error('Google authorization expired')));
+    expect(screen.getByRole('alert')).toHaveTextContent('Google authorization expired');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    await act(async () => finish(liveResponse('google-after-auth-failure')));
+    vi.useFakeTimers();
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(screen.queryByTestId('route-card-google-after-auth-failure')).not.toBeInTheDocument();
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    expect(screen.getByRole('alert')).toHaveTextContent('Google authorization expired');
+    expect(screen.getByRole('button', { name: 'Reconnect Google map' })).toBeVisible();
+    expect(google.initializeMap).toHaveBeenCalledTimes(1);
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    expect(google.attachAutocomplete).toHaveBeenCalledTimes(2);
+  });
+
+  it('queues a current endpoint refresh after an obsolete request settles instead of overlapping requests', async () => {
+    let finish!: (response: ReturnType<typeof liveResponse>) => void;
+    google.getRoutes
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(liveResponse('google-current'));
+    await renderGooglePlanner();
+    useOneWay();
+    vi.useFakeTimers();
+    planRoute();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    fireEvent.input(screen.getByLabelText('Destination', { exact: true }), {
+      target: { value: 'Latest destination' },
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(800));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    await act(async () => finish(liveResponse('google-obsolete')));
+    expect(screen.queryByTestId('route-card-google-obsolete')).not.toBeInTheDocument();
+    await act(async () => vi.advanceTimersByTimeAsync(800));
+    expect(google.getRoutes).toHaveBeenCalledTimes(2);
+    expect(google.getRoutes).toHaveBeenLastCalledWith(
+      expect.objectContaining({ destination: { label: 'Latest destination' } }),
+    );
+    expect(screen.getByTestId('route-card-google-current')).toBeInTheDocument();
   });
 });
 
@@ -549,18 +878,11 @@ describe('component host updates', () => {
           finish = resolve;
         }),
     );
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Load Google map' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Request Google driving routes' })).toBeVisible(),
-    );
-    fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
-    fireEvent.click(screen.getByRole('button', { name: 'Request Google driving routes' }));
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
     await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
-    fireEvent.change(screen.getByLabelText('Destination', { exact: true }), {
+    fireEvent.input(screen.getByLabelText('Destination', { exact: true }), {
       target: { value: 'Changed destination' },
     });
     await act(async () =>
@@ -593,7 +915,7 @@ describe('component host updates', () => {
     expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue(
       'Changed destination',
     );
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
   });
 
   it('removes one-way live results when round-trip requirements change', async () => {
@@ -621,19 +943,12 @@ describe('component host updates', () => {
       attribution: 'Google Maps',
       requestCount: 1,
     });
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    fireEvent.click(
-      screen.getByLabelText(/I understand Google Maps and route requests may incur charges/),
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Load Google map' }));
-    await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Request Google driving routes' })).toBeVisible(),
-    );
-    fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
-    fireEvent.click(screen.getByRole('button', { name: 'Request Google driving routes' }));
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
     await waitFor(() => expect(screen.getByTestId('route-card-google-oneway')).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
     expect(screen.queryByTestId('route-card-google-oneway')).not.toBeInTheDocument();
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
   });
 });
