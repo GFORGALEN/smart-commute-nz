@@ -36,6 +36,7 @@ import {
   createExampleOptions,
   DEFAULT_SETTINGS,
   type CommuteSettings,
+  type CostRange,
   type JourneyOption,
   type Location,
   type RouteComparison,
@@ -91,6 +92,7 @@ const warningKeys = {
   'estimated-data': 'estimatedWarning',
   'unverified-parking': 'parkingWarning',
   'missing-return': 'returnWarning',
+  'fare-range-estimate': 'fareRangeHelp',
 } as const;
 const toLocation = (value: Location | string): Location =>
   typeof value === 'string' ? { label: value } : value;
@@ -107,7 +109,9 @@ const hasGoogleProvenance = (option: JourneyOption) =>
   [...option.outbound, ...option.inbound].some((leg) => leg.source === 'google');
 const usesATFare = (option: JourneyOption, roundTrip: boolean) =>
   [...option.outbound, ...(roundTrip ? option.inbound : [])].some(
-    (leg) => (leg.mode === 'bus' || leg.mode === 'train') && leg.source === 'at-rule',
+    (leg) =>
+      (leg.mode === 'bus' || leg.mode === 'train') &&
+      (leg.fareSource === 'at-rule' || leg.source === 'at-rule'),
   );
 const atFareContext = (option: JourneyOption, state: PlannerState, currentMinute: number) =>
   JSON.stringify({
@@ -206,6 +210,7 @@ function NumberField({
   max,
   suffix,
   integer = false,
+  allowEmpty = false,
 }: {
   label: string;
   value: number;
@@ -215,10 +220,11 @@ function NumberField({
   max?: number;
   suffix?: string;
   integer?: boolean;
+  allowEmpty?: boolean;
 }) {
   const id = useId();
   const invalid =
-    !Number.isFinite(value) ||
+    (!Number.isFinite(value) && !(allowEmpty && Number.isNaN(value))) ||
     value < 0 ||
     (max !== undefined && value > max) ||
     (integer && !Number.isInteger(value));
@@ -340,7 +346,12 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const googlePlaceSignatures = useRef(new Set<string>());
   const manualLocations = useRef({ origin: state.origin, destination: state.destination });
   const provider = useMemo(
-    () => new GoogleRouteProvider({ apiKey: props.googleApiKey, trafficAware: true }),
+    () =>
+      new GoogleRouteProvider({
+        apiKey: props.googleApiKey,
+        trafficAware: true,
+        estimateMissingTransitFare: true,
+      }),
     [props.googleApiKey],
   );
   const activeProvider = useRef(provider);
@@ -377,6 +388,17 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   activeQuery.current = liveQueryFingerprint;
   const t = useMemo(() => createTranslator(locale), [locale]);
   const money = (value: number) => formatMoney(value, locale);
+  const moneyWithRange = (value: number, range?: CostRange) =>
+    range
+      ? range.min === range.max
+        ? t('approximateAmount', { amount: money(range.max) })
+        : t('fareRangeValue', { min: money(range.min), max: money(range.max) })
+      : money(value);
+  const generalizedRange = (result: RouteResult): CostRange | undefined => {
+    if (!result.totalCostRange) return;
+    const timeCost = result.generalizedCost - result.totalCost;
+    return { min: result.totalCostRange.min + timeCost, max: result.totalCostRange.max + timeCost };
+  };
   const nameOf = (option: JourneyOption | RouteResult) =>
     option.id === 'drive'
       ? t('driveName')
@@ -439,6 +461,23 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const selected =
     comparison.result?.results.find((result) => result.id === selectedId) ??
     comparison.result?.results[0];
+  const hasFareRanges = Boolean(comparison.result?.results.some((result) => result.totalCostRange));
+  const fareExplanationKey = (option: JourneyOption) => {
+    const ranges = [...option.outbound, ...(state.settings.roundTrip ? option.inbound : [])]
+      .filter((leg) => leg.fare === undefined && leg.fareRange)
+      .map((leg) => leg.fareRange!);
+    return ranges.length && ranges.every((range) => range.basis === 'citylink')
+      ? 'cityLinkFareRangeHelp'
+      : 'fareRangeHelp';
+  };
+  const rankingLabel = (kind: 'cheapest' | 'fastest' | 'fewestTransfers' | 'bestValue') =>
+    t(
+      hasFareRanges && kind === 'cheapest'
+        ? 'budgetCheapest'
+        : hasFareRanges && kind === 'bestValue'
+          ? 'budgetBestValue'
+          : kind,
+    );
 
   useEffect(() => {
     if (props.locale) setLocale(props.locale);
@@ -643,12 +682,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               ...option,
               [direction]: option[direction].map((leg, legIndex) => {
                 if (legIndex === index) {
-                  const explicitFare = Object.keys(patch).length === 1 && 'fare' in patch;
+                  const explicitFare = 'fare' in patch;
                   const stillTransit =
                     (patch.mode ?? leg.mode) === 'bus' || (patch.mode ?? leg.mode) === 'train';
                   return {
                     ...leg,
                     ...patch,
+                    fareSource: explicitFare ? 'manual' : (patch.fareSource ?? leg.fareSource),
                     source:
                       leg.source === 'at-rule' && !explicitFare && stillTransit
                         ? 'at-rule'
@@ -659,18 +699,33 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 // An explicit fare edit is the user's manual total for this
                 // direction, including the zero-priced integrated segments.
                 if (
-                  Object.keys(patch).length === 1 &&
                   'fare' in patch &&
-                  leg.source === 'at-rule' &&
+                  (leg.source === 'at-rule' || leg.fareSource === 'at-rule') &&
                   (leg.mode === 'bus' || leg.mode === 'train')
                 )
-                  return { ...leg, source: 'manual', estimated: true };
+                  return { ...leg, source: 'manual', fareSource: 'manual', estimated: true };
                 return leg;
               }),
             }
           : option,
       ),
     }));
+  const updateLiveTransitFare = (option: JourneyOption, direction: Direction, fare?: number) => {
+    const original = googleResponse?.routes.find((route) => route.id === option.id)?.[direction];
+    const first = option[direction].findIndex((leg) => leg.mode === 'bus' || leg.mode === 'train');
+    updateOption(option.id, {
+      [direction]: option[direction].map((leg, index): TravelLeg => {
+        if (leg.mode !== 'bus' && leg.mode !== 'train') return leg;
+        const baseline = original?.[index];
+        return {
+          ...leg,
+          fare: fare === undefined ? baseline?.fare : index === first ? fare : 0,
+          fareRange: fare === undefined ? baseline?.fareRange : undefined,
+          fareSource: fare === undefined ? baseline?.fareSource : 'manual',
+        };
+      }),
+    });
+  };
   const selectResult = (result: RouteResult) => {
     setSelectedId(result.id);
     if (googleMode) setEditingMode(result.option.mode);
@@ -1303,12 +1358,27 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           )}
           {['bus', 'train'].includes(leg.mode) && (
             <>
-              <NumberField
-                label={fareLabel}
-                value={leg.fare ?? 0}
-                onChange={(fare) => updateLeg(option.id, direction, index, { fare })}
-                t={t}
-              />
+              {(!live || index === transitIndex) && (
+                <NumberField
+                  label={fareLabel}
+                  value={live ? (leg.fare ?? Number.NaN) : (leg.fare ?? 0)}
+                  allowEmpty={live && leg.fare === undefined && Boolean(leg.fareRange)}
+                  onChange={(fare) =>
+                    live
+                      ? updateLiveTransitFare(
+                          option,
+                          direction,
+                          Number.isNaN(fare) ? undefined : fare,
+                        )
+                      : updateLeg(option.id, direction, index, {
+                          fare,
+                          fareRange: undefined,
+                          fareSource: 'manual',
+                        })
+                  }
+                  t={t}
+                />
+              )}
               {live ? (
                 <label className="sc-route-measurements">
                   <span>{t('transfers')}</span>
@@ -1327,6 +1397,31 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             </>
           )}
         </div>
+        {leg.fare === undefined && leg.fareRange && (
+          <div className="sc-fare-range-note">
+            <strong>
+              {t('fareRangeBadge')}: {moneyWithRange(leg.fareRange.max, leg.fareRange)}
+            </strong>
+            <p>
+              {t(leg.fareRange.basis === 'citylink' ? 'cityLinkFareRangeHelp' : 'fareRangeHelp')}
+            </p>
+            <p>{t('actualFareHint')}</p>
+          </div>
+        )}
+        {leg.transit && (
+          <div className="sc-transit-details">
+            <span>{leg.transit.lineShortName || leg.transit.lineName}</span>
+            {leg.transit.departureStop && leg.transit.arrivalStop && (
+              <span>
+                {leg.transit.departureStop} → {leg.transit.arrivalStop}
+              </span>
+            )}
+            {leg.transit.stopCount !== undefined && (
+              <span>{t('transitStopCount', { count: leg.transit.stopCount })}</span>
+            )}
+            {index === transitIndex && <small>{t('transitStopCountHelp')}</small>}
+          </div>
+        )}
       </div>
     );
   };
@@ -1430,7 +1525,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           t={t}
         />
       )}
-      {option.mode !== 'drive' && !hasGoogleProvenance(option) && (
+      {option.mode !== 'drive' && (
         <ATFareHelper
           option={option}
           locale={locale}
@@ -1447,7 +1542,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               const first = legs.findIndex((leg) => leg.mode === 'bus' || leg.mode === 'train');
               return legs.map((leg, index): TravelLeg =>
                 leg.mode === 'bus' || leg.mode === 'train'
-                  ? { ...leg, fare: index === first ? fare : 0, source: 'at-rule', estimated: true }
+                  ? {
+                      ...leg,
+                      fare: index === first ? fare : 0,
+                      fareRange: undefined,
+                      fareSource: 'at-rule',
+                      source: hasGoogleProvenance(option) ? leg.source : 'at-rule',
+                      estimated: true,
+                    }
                   : leg,
               );
             };
@@ -1884,7 +1986,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         )}
         {visibleOptions
           .filter(
-            (option) => option.mode === editingMode && (!googleMode || option.id === selected?.id),
+            (option) =>
+              option.mode === editingMode &&
+              (!googleMode || option.id === (selected?.id ?? selectedId)),
           )
           .map(renderOptionEditor)}
         {!googleMode && editingMode === 'drive' && (
@@ -2084,6 +2188,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           {t(state.settings.roundTrip ? 'returnIncluded' : 'oneWay')}
         </span>
       </div>
+      {hasFareRanges && <p className="sc-help sc-range-ranking-note">{t('fareRangeRankHelp')}</p>}
       {comparison.error && (
         <div className="sc-empty-state" role="alert">
           <Info size={26} />
@@ -2114,7 +2219,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               <strong>{nameOf(result)}</strong>
               <span className="sc-result-source">
                 {hasGoogleProvenance(result.option)
-                  ? t('googleVerifiedGeometry')
+                  ? t(result.totalCostRange ? 'fareRangeSource' : 'googleVerifiedGeometry')
                   : [...result.option.outbound, ...result.option.inbound].some(
                         (leg) => leg.source === 'at-rule',
                       )
@@ -2125,8 +2230,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             {selected?.id === result.id && <Check size={16} className="sc-selection-check" />}
           </div>
           <div className="sc-result-value">
-            <span className="sc-money" data-testid={`cost-${result.id}`}>
-              {money(result.totalCost)}
+            <span
+              className={`sc-money ${result.totalCostRange ? 'sc-money-range' : ''}`}
+              data-testid={`cost-${result.id}`}
+            >
+              {moneyWithRange(result.totalCost, result.totalCostRange)}
             </span>
             <span>{t('perCommute')}</span>
           </div>
@@ -2142,7 +2250,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             {comparison.result?.cheapest.id === result.id && (
               <span className="sc-badge sc-badge-green">
                 <Wallet size={11} />
-                {t('cheapest')}
+                {rankingLabel('cheapest')}
               </span>
             )}
             {comparison.result?.fastest.id === result.id && (
@@ -2152,12 +2260,18 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               </span>
             )}
             {comparison.result?.bestValue.id === result.id && (
-              <span className="sc-badge sc-badge-neutral">{t('bestValue')}</span>
+              <span className="sc-badge sc-badge-neutral">{rankingLabel('bestValue')}</span>
             )}
             {comparison.result?.fewestTransfers.id === result.id && (
               <span className="sc-badge sc-badge-neutral">{t('fewestTransfers')}</span>
             )}
           </div>
+          {result.totalCostRange && (
+            <span className="sc-result-warning sc-fare-range-warning">
+              <Info size={12} />
+              {t('fareRangeBadge')} · {t(fareExplanationKey(result.option))}
+            </span>
+          )}
           {result.warnings.includes('unverified-parking') && (
             <span className="sc-result-warning">
               <Info size={12} />
@@ -2172,7 +2286,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             <Wallet size={16} />
             {t('monthlyProjection')}
           </span>
-          <strong>{money(selected.monthlyCost)}</strong>
+          <strong className={selected.monthlyCostRange ? 'sc-projection-range' : ''}>
+            {moneyWithRange(selected.monthlyCost, selected.monthlyCostRange)}
+          </strong>
           <p>
             {t('basedOn', {
               days: state.settings.daysPerWeek,
@@ -2189,14 +2305,16 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <div>
             <h3>{t('recommendation')}</h3>
             <p>
-              {t('savingReason', {
-                cheapest: nameOf(comparison.result.cheapest),
-                other: nameOf(comparison.result.results[comparison.result.results.length - 1]),
-                saving: money(
-                  comparison.result.results[comparison.result.results.length - 1].totalCost -
-                    comparison.result.cheapest.totalCost,
-                ),
-              })}
+              {hasFareRanges
+                ? t('fareRangeRankHelp')
+                : t('savingReason', {
+                    cheapest: nameOf(comparison.result.cheapest),
+                    other: nameOf(comparison.result.results[comparison.result.results.length - 1]),
+                    saving: money(
+                      comparison.result.results[comparison.result.results.length - 1].totalCost -
+                        comparison.result.cheapest.totalCost,
+                    ),
+                  })}
             </p>
             {comparison.result.cheapest.totalMinutes > comparison.result.fastest.totalMinutes && (
               <p>
@@ -2209,7 +2327,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               </p>
             )}
             <p>
-              {t('valueReason', {
+              {t(hasFareRanges ? 'budgetValueReason' : 'valueReason', {
                 value: money(state.settings.valueOfTime),
                 name: nameOf(comparison.result.bestValue),
               })}
@@ -2238,14 +2356,17 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               const result = comparison.result![kind];
               return (
                 <button key={kind} onClick={() => selectResult(result)}>
-                  <span>{t(kind)}</span>
+                  <span>{rankingLabel(kind)}</span>
                   <strong>{nameOf(result)}</strong>
                   <small>
                     {kind === 'fastest'
                       ? t('minutes', { count: shortNumber(result.totalMinutes) })
                       : kind === 'fewestTransfers'
                         ? t('transferCount', { count: result.transfers })
-                        : money(kind === 'bestValue' ? result.generalizedCost : result.totalCost)}
+                        : moneyWithRange(
+                            kind === 'bestValue' ? result.generalizedCost : result.totalCost,
+                            kind === 'bestValue' ? generalizedRange(result) : result.totalCostRange,
+                          )}
                   </small>
                 </button>
               );
@@ -2281,19 +2402,20 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                       </button>
                     </td>
                     <td>
-                      <strong>{money(result.totalCost)}</strong>
+                      <strong>{moneyWithRange(result.totalCost, result.totalCostRange)}</strong>
                     </td>
                     <td>{t('minutes', { count: shortNumber(result.totalMinutes) })}</td>
                     <td>{result.transfers}</td>
-                    <td>{money(result.weeklyCost)}</td>
-                    <td>{money(result.monthlyCost)}</td>
-                    <td>{money(result.generalizedCost)}</td>
+                    <td>{moneyWithRange(result.weeklyCost, result.weeklyCostRange)}</td>
+                    <td>{moneyWithRange(result.monthlyCost, result.monthlyCostRange)}</td>
+                    <td>{moneyWithRange(result.generalizedCost, generalizedRange(result))}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
           <p className="sc-help">{t('timeValueExplanation')}</p>
+          {hasFareRanges && <p className="sc-help">{t('fareRangeRankHelp')}</p>}
           <button className="sc-primary-button" onClick={() => setScreen('breakdown')}>
             {t('breakdown')}
             <ChevronRight size={16} />
@@ -2306,10 +2428,15 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   );
 
   const renderBreakdown = () => {
-    const pieces: { key: MessageKey; value: number; color: string }[] = selected
+    const pieces: { key: MessageKey; value: number; range?: CostRange; color: string }[] = selected
       ? [
           { key: 'fuel', value: selected.fuelCost, color: '#007f6d' },
-          { key: 'fares', value: selected.fareCost, color: '#a4bd73' },
+          {
+            key: 'fares',
+            value: selected.fareCost,
+            range: selected.fareCostRange,
+            color: '#a4bd73',
+          },
           { key: 'parkingLabel', value: selected.parkingCost, color: '#dfba73' },
           { key: 'tolls', value: selected.tollCost, color: '#839daf' },
           { key: 'maintenance', value: selected.maintenanceCost, color: '#ad97b6' },
@@ -2340,14 +2467,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               <div className="sc-surface">
                 <h2>{t('components')}</h2>
                 <div className="sc-breakdown-total">
-                  <strong>{money(selected.totalCost)}</strong>
+                  <strong>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</strong>
                   <span>{t('perCommute')}</span>
                 </div>
                 <div
                   className="sc-stacked-bar"
                   role="img"
                   aria-label={pieces
-                    .map((piece) => `${t(piece.key)}: ${money(piece.value)}`)
+                    .map((piece) => `${t(piece.key)}: ${moneyWithRange(piece.value, piece.range)}`)
                     .join(', ')}
                 >
                   {pieces
@@ -2366,25 +2493,26 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                         <i style={{ background: piece.color }} />
                         {t(piece.key)}
                       </dt>
-                      <dd>{money(piece.value)}</dd>
+                      <dd>{moneyWithRange(piece.value, piece.range)}</dd>
                     </div>
                   ))}
                   <div className="sc-cost-total">
                     <dt>{t('total')}</dt>
-                    <dd>{money(selected.totalCost)}</dd>
+                    <dd>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</dd>
                   </div>
                 </dl>
                 <p className="sc-help">{t('formula')}</p>
+                {selected.totalCostRange && <p className="sc-help">{t('fareRangeBudgetHelp')}</p>}
               </div>
               <div className="sc-surface sc-budget-surface">
                 <h2>{t('commutingPattern')}</h2>
                 <div className="sc-budget-number">
                   <span>{t('weekly')}</span>
-                  <strong>{money(selected.weeklyCost)}</strong>
+                  <strong>{moneyWithRange(selected.weeklyCost, selected.weeklyCostRange)}</strong>
                 </div>
                 <div className="sc-budget-number">
                   <span>{t('monthly')}</span>
-                  <strong>{money(selected.monthlyCost)}</strong>
+                  <strong>{moneyWithRange(selected.monthlyCost, selected.monthlyCostRange)}</strong>
                 </div>
                 <p>
                   {t('basedOn', {
@@ -2400,7 +2528,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                   </div>
                   <div>
                     <dt>{t('generalizedCost')}</dt>
-                    <dd>{money(selected.generalizedCost)}</dd>
+                    <dd>{moneyWithRange(selected.generalizedCost, generalizedRange(selected))}</dd>
                   </div>
                 </dl>
                 <p className="sc-help">{t('timeValueExplanation')}</p>
@@ -2415,7 +2543,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                     <h3>
                       {t(directionKeys[direction])}
                       <span>
-                        {money(selected.breakdown[direction].totalCost)} ·{' '}
+                        {moneyWithRange(
+                          selected.breakdown[direction].totalCost,
+                          selected.breakdown[direction].totalCostRange,
+                        )}{' '}
+                        ·{' '}
                         {t('minutes', {
                           count: shortNumber(selected.breakdown[direction].totalMinutes),
                         })}
@@ -2448,7 +2580,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               {selected.warnings.map((warning) => (
                 <p key={warning}>
                   <Info size={15} />
-                  {t(warningKeys[warning])}
+                  {t(
+                    warning === 'fare-range-estimate'
+                      ? fareExplanationKey(selected.option)
+                      : warningKeys[warning],
+                  )}
                 </p>
               ))}
             </div>

@@ -47,6 +47,8 @@ export const DATA_SOURCES: readonly DataSource[] = [
       'path',
       'warnings',
       'travelAdvisory.transitFare',
+      'legs.steps.transitDetails.stopCount',
+      'legs.steps.transitDetails.transitLine',
     ],
     status: 'integrated',
     verifiedOn: '2026-10-09',
@@ -58,7 +60,7 @@ export const DATA_SOURCES: readonly DataSource[] = [
     redistribution: 'restricted',
     limitations: [
       'Limited Auckland live checks on 2026-10-09 verified maps, driving, address search and geocoding; wider coverage remains unverified.',
-      'Fare may be absent or incomplete; missing NZD fare requires manual input.',
+      'A complete Google NZD fare is preferred; the planner estimates an adult AT range for recognized AT bus/train services when fare data is incomplete. Other operators require manual pricing.',
       'Only transient session memory; no localStorage/API response caching.',
       'Draw Google routes on a Google map and preserve attribution.',
     ],
@@ -79,7 +81,8 @@ export const DATA_SOURCES: readonly DataSource[] = [
     redistribution: 'unverified',
     limitations: [
       'Effective 1 February 2026; snapshot requires refresh for February 2027.',
-      'User must verify zones/overlap rules and eligibility.',
+      'Specific fare estimates require verified zones/overlap rules and eligibility. Automatic ranges are an adult tariff envelope, not stop-count or zone predictions.',
+      'Ranges exclude concession, subsidy and fare-cap history; unknown transfer eligibility widens the upper end.',
       'No automatic fare-zone polygon intersection.',
       'Ferries, group travel and monthly ferry pass interactions not implemented.',
     ],

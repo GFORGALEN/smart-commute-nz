@@ -10,7 +10,7 @@ live follow-up is described below.
 | `npm run format:check`                      | Passed                                                     |
 | `npm run lint`                              | Passed, no warnings                                        |
 | `npm run typecheck`                         | Passed, strict TypeScript                                  |
-| `npm run test`                              | **155 passed** across four files                           |
+| `npm run test`                              | **200 passed** across four files                           |
 | Production app and independent widget build | Passed with `/smart-commute-nz/` base                      |
 | Development Playwright                      | **20 passed**, four production-only cases skipped          |
 | Production Playwright                       | **24 passed**, no skipped cases                            |
@@ -22,17 +22,22 @@ simultaneous independent widgets, including uniqueness of document element IDs.
 
 ## Coverage
 
-- **39 core tests:** fuel formula, zero and invalid inputs, separate outward/return
+- **53 core tests:** fuel formula, zero and invalid inputs, separate outward/return
   legs, parking once, fares, tolls, maintenance, changing prices/consumption,
-  weekly/monthly projections, time value and deterministic ranking.
-- **51 provider tests:** current SDK request shapes via injected test fixtures,
+  weekly/monthly projections, time value and deterministic ranking. Range cases
+  cover validation, exact overrides including zero, independent round trips,
+  fixed fees once, projections and upper-bound ranking.
+- **75 provider tests:** current SDK request shapes via injected test fixtures,
   missing keys, quota and API errors, separate return requests, transit fare
   completeness, top-level SDK field masks, structured SDK/RPC error handling,
   sanitized error messages, synchronized autocomplete text and selection races,
   first-map-idle readiness, authentication failure handling, SDK timeouts, cleanup,
   manual input validation and dated AT fare rules. Waypoint cases cover two-stop
   return order, ten-stop limits, map click/cancel/disposal and numbered overlay cleanup.
-- **43 planner tests:** editable costs, persistence, callback/host props, bilingual
+  Fare-range cases cover complete NZD priority, malformed/foreign/missing fares,
+  AT operator recognition, CityLink, known and unknown transfers, separate fares,
+  actual stop metadata, walk-only routes and actual boarding dates at table boundaries.
+- **50 planner tests:** editable costs, persistence, callback/host props, bilingual
   UI, Google failure/attribution, transient Google data, stale async query rejection,
   incomplete returns, stale AT fare exclusion, manual fare recovery and parking
   acknowledgment reset. Google-first cases cover automatic map/address initialization,
@@ -48,6 +53,9 @@ simultaneous independent widgets, including uniqueness of document element IDs.
   Driving stops cover Places selection, first-query inclusion, reorder/removal and
   debounced updates, ten-stop limits, transit rejection, one-click map selection,
   search cleanup/draft restoration and exclusion of Places content from local storage.
+  Range cases cover cards, comparisons, breakdowns and projections; exact manual
+  overrides and clearing to restore; independent return overrides; verified AT
+  replacement with Google geometry preserved; CityLink wording; and unknown operators.
 - **22 AT helper tests:** verified zones, concession eligibility, Auckland tag-on
   time, independent return times, transfer windows, explicit ride segments, changed
   endpoints, malformed durations and reapplication after context changes.
@@ -106,9 +114,10 @@ Places returned **five address suggestions** and selected-place coordinates; key
 selection in the actual autocomplete widget also returned coordinates. Address
 geocoding succeeded.
 
-The transit SDK returned **six route alternatives**, but each fare object had an
-empty currency code. The app rejected the incomplete NZD prices and required manual
-pricing or verified AT estimates. It did not treat missing fares as free travel.
+The initial transit SDK check returned **six route alternatives**, but each fare
+object had an empty currency code. The initial version required manual pricing or
+verified AT estimates. It did not treat missing fares as free travel. The updated
+range flow below keeps recognized AT routes usable.
 Google supplies a transit fare only when it knows fares for every transit step; see
 [the official fare property](https://developers.google.com/maps/documentation/javascript/reference/route#RouteTravelAdvisory.transitFare).
 
@@ -135,6 +144,16 @@ remained for the retained stop. Transit planning with stops was blocked explicit
 and exposed the official AT fare link. The 393 px mobile check had no horizontal
 overflow or console/page errors. These checks do not certify every stop location or
 AT fare availability.
+
+The fare-range follow-up made two one-way transit requests while validating a
+Britomart → Newmarket scenario (the first smoke script expected a different currency
+label; the application showed the correct amount). The completed scenario returned
+six real alternatives, displayed NZ$3.00–7.90, and showed route 70, eight stops and
+boarding/alighting names. Entering NZ$4.90 replaced the range and clearing it restored
+the original estimate. Fare edits and navigation to comparison/breakdown caused no
+additional route request. Desktop and 393 px mobile screenshots were reviewed; there
+was no horizontal overflow, console error or uncaught page error. This verifies the
+interaction and metadata, not the actual zone count or journey price.
 
 ## Practical limits
 

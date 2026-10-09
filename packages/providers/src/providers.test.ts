@@ -12,6 +12,8 @@ import type {
   FarePayment,
   GoogleComputeRequest,
   GoogleRouteData,
+  GoogleRouteProviderOptions,
+  GoogleRouteStep,
   PassengerType,
   RouteRequest,
 } from './index';
@@ -39,13 +41,41 @@ const drive = (distanceMeters: number, durationMillis = 1200000): GoogleRouteDat
 });
 const nzWeekday = new Date('2026-10-09T08:00:00+13:00');
 
-function mockGoogle(responses: GoogleRouteData[][]) {
+function mockGoogle(responses: GoogleRouteData[][], options: GoogleRouteProviderOptions = {}) {
   const computeRoutes =
     vi.fn<(input: GoogleComputeRequest) => Promise<{ routes: GoogleRouteData[] }>>();
   for (const routes of responses) computeRoutes.mockResolvedValueOnce({ routes });
   const loadLibrary = vi.fn().mockResolvedValue({ Route: { computeRoutes } });
-  const provider = new GoogleRouteProvider({ apiKey: 'test-key-never-sent', loadLibrary });
+  const provider = new GoogleRouteProvider({
+    apiKey: 'test-key-never-sent',
+    loadLibrary,
+    ...options,
+  });
   return { provider, computeRoutes, loadLibrary };
+}
+
+function atStep(overrides: GoogleRouteStep['transitDetails'] = {}): GoogleRouteStep {
+  return {
+    travelMode: 'TRANSIT',
+    staticDurationMillis: 600000,
+    distanceMeters: 5000,
+    transitDetails: {
+      stopCount: 7,
+      departureStop: { name: 'Origin bus stop' },
+      arrivalStop: { name: 'Destination bus stop' },
+      transitLine: {
+        name: 'Example AT service',
+        shortName: '75',
+        vehicle: { vehicleType: 'BUS' },
+        agencies: [{ name: 'Auckland Transport', url: 'https://at.govt.nz/' }],
+      },
+      ...overrides,
+    },
+  };
+}
+
+function transitRoute(steps: GoogleRouteStep[], durationMinutes = 60): GoogleRouteData {
+  return { distanceMeters: 12000, durationMillis: durationMinutes * 60000, legs: [{ steps }] };
 }
 
 describe('manual adapter', () => {
@@ -469,6 +499,290 @@ describe('Google adapter without external paid requests', () => {
       code: 'INCOMPLETE_RESULT',
     });
   });
+  it('keeps real walking, waiting and stop metadata while estimating an unpriced AT journey', async () => {
+    const { provider } = mockGoogle(
+      [
+        [
+          transitRoute(
+            [
+              { travelMode: 'WALKING', distanceMeters: 400, staticDurationMillis: 300000 },
+              atStep(),
+            ],
+            20,
+          ),
+        ],
+      ],
+      { estimateMissingTransitFare: true },
+    );
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    const legs = result.routes[0]!.outbound;
+    expect(legs.map((leg) => leg.mode)).toEqual(['walk', 'bus', 'wait']);
+    expect(legs.reduce((sum, leg) => sum + leg.durationMinutes, 0)).toBe(20);
+    expect(legs[1]).toMatchObject({
+      source: 'google',
+      fareSource: 'at-estimate',
+      fareRange: { min: 3, max: 7.9, source: 'at-estimate', basis: 'standard-adult' },
+      transit: {
+        stopCount: 7,
+        departureStop: 'Origin bus stop',
+        arrivalStop: 'Destination bus stop',
+        lineName: 'Example AT service',
+        lineShortName: '75',
+        agencyNames: ['Auckland Transport'],
+      },
+    });
+    expect(legs[1]!.fare).toBeUndefined();
+    expect(legs[1]!.fareRange!.assumptions!.join(' ')).toContain('do not determine fare zones');
+    expect(result.attributionLinks).toContainEqual({
+      label: 'Auckland Transport',
+      url: 'https://at.govt.nz/',
+    });
+    expect(result.warnings.join(' ')).not.toContain('estimated AT');
+  });
+  it('does not turn stop counts or road distance into a guessed fare-zone count', async () => {
+    const { provider } = mockGoogle(
+      [
+        [
+          transitRoute([atStep({ stopCount: 1 })]),
+          { ...transitRoute([atStep({ stopCount: 50 })]), distanceMeters: 100000 },
+        ],
+      ],
+      { estimateMissingTransitFare: true },
+    );
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes.map((route) => route.outbound[0]!.fareRange)).toEqual([
+      expect.objectContaining({ min: 3, max: 7.9 }),
+      expect.objectContaining({ min: 3, max: 7.9 }),
+    ]);
+    expect(result.routes.map((route) => route.outbound[0]!.transit!.stopCount)).toEqual([1, 50]);
+  });
+  it('gives a complete Google fare priority and includes additional boardings once', async () => {
+    const route = transitRoute([atStep(), atStep()]);
+    route.travelAdvisory = { transitFare: { currencyCode: 'NZD', units: 4, nanos: 900000000 } };
+    const { provider } = mockGoogle([[route]], { estimateMissingTransitFare: true });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    const legs = result.routes[0]!.outbound;
+    expect(legs[0]).toMatchObject({ fare: 4.9, fareSource: 'google' });
+    expect(legs[0]!.fareRange).toBeUndefined();
+    expect(legs[1]).toMatchObject({ fare: 0, fareSource: 'google', transfers: 1 });
+  });
+  it.each([
+    { currencyCode: 'NZD' },
+    { currencyCode: 'NZD', units: NaN },
+    { currencyCode: 'NZD', units: -1 },
+    { currencyCode: 'NZD', units: 3, nanos: 1000000000 },
+    { currencyCode: 'USD', units: 3 },
+  ])(
+    'treats absent, malformed or foreign-currency money as missing rather than free (%j)',
+    async (money) => {
+      const route = transitRoute([atStep()]);
+      route.travelAdvisory = { transitFare: money };
+      const { provider } = mockGoogle([[route]], { estimateMissingTransitFare: true });
+      const result = await provider.getRoutes({ ...request, mode: 'transit' });
+      expect(result.routes[0]!.outbound[0]!.fare).toBeUndefined();
+      expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({ min: 3, max: 7.9 });
+    },
+  );
+  it('retains an explicitly reported zero Google fare', async () => {
+    const route = transitRoute([atStep()]);
+    route.travelAdvisory = { transitFare: { currencyCode: 'NZD', units: 0 } };
+    const { provider } = mockGoogle([[route]], { estimateMissingTransitFare: true });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes[0]!.outbound[0]).toMatchObject({ fare: 0, fareSource: 'google' });
+    expect(result.routes[0]!.outbound[0]!.fareRange).toBeUndefined();
+  });
+  it('integrates a known bus/train transfer within 30 minutes and four hours', async () => {
+    const departure = new Date('2026-10-09T08:00:00+13:00');
+    const bus = atStep({
+      departureTime: departure,
+      arrivalTime: new Date('2026-10-09T08:10:00+13:00'),
+    });
+    const train = atStep({
+      departureTime: new Date('2026-10-09T08:30:00+13:00'),
+      arrivalTime: new Date('2026-10-09T08:45:00+13:00'),
+      transitLine: { vehicle: { vehicleType: 'HEAVY_RAIL' }, agencies: [{ name: 'AT Metro' }] },
+    });
+    const { provider } = mockGoogle([[transitRoute([bus, train])]], {
+      estimateMissingTransitFare: true,
+    });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    const legs = result.routes[0]!.outbound;
+    expect(legs[0]!.fareRange).toMatchObject({ min: 3, max: 7.9 });
+    expect(legs[1]).toMatchObject({
+      mode: 'train',
+      fare: 0,
+      fareSource: 'at-estimate',
+      transfers: 1,
+    });
+    expect(legs.filter((leg) => leg.fareRange)).toHaveLength(1);
+  });
+  it('widens the upper estimate when transfer timing is unknown instead of assuming free transfers', async () => {
+    const { provider } = mockGoogle([[transitRoute([atStep(), atStep()])]], {
+      estimateMissingTransitFare: true,
+    });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({ min: 3, max: 15.8 });
+    expect(result.routes[0]!.outbound[0]!.fareRange!.assumptions!.join(' ')).toContain(
+      'Incomplete transfer timing',
+    );
+  });
+  it.each([
+    ['a transfer longer than thirty minutes', '09:00:00', '09:10:00'],
+    ['a journey longer than four hours', '08:30:00', '12:10:00'],
+  ])('adds separately priced journeys for %s', async (_case, departure, arrival) => {
+    const steps = [
+      atStep({
+        departureTime: new Date('2026-10-09T08:00:00+13:00'),
+        arrivalTime: new Date('2026-10-09T08:10:00+13:00'),
+      }),
+      atStep({
+        departureTime: new Date(`2026-10-09T${departure}+13:00`),
+        arrivalTime: new Date(`2026-10-09T${arrival}+13:00`),
+      }),
+    ];
+    const { provider } = mockGoogle([[transitRoute(steps, 300)]], {
+      estimateMissingTransitFare: true,
+    });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({ min: 6, max: 15.8 });
+  });
+  it('uses the dedicated CityLink tariff only for a confirmed CityLink service', async () => {
+    const cityLink = atStep({
+      transitLine: {
+        shortName: 'CityLink',
+        vehicle: { vehicleType: 'BUS' },
+        agencies: [{ name: 'Auckland Transport' }],
+      },
+    });
+    const { provider } = mockGoogle([[transitRoute([cityLink])]], {
+      estimateMissingTransitFare: true,
+    });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({
+      min: 0.95,
+      max: 0.95,
+      basis: 'citylink',
+    });
+  });
+  it.each([
+    { vehicle: { vehicleType: 'BUS' } },
+    {
+      vehicle: { vehicleType: 'BUS' },
+      agencies: [{ name: 'Metlink', url: 'https://metlink.org.nz/' }],
+    },
+    { vehicle: { vehicleType: 'INTERCITY_BUS' }, agencies: [{ name: 'Auckland Transport' }] },
+    {
+      vehicle: { vehicleType: 'BUS' },
+      agencies: [{ name: 'Unknown operator', url: 'https://at.govt.nz.example.org/' }],
+    },
+  ])(
+    'does not apply AT tariffs to an unknown operator or excluded service (%j)',
+    async (transitLine) => {
+      const { provider } = mockGoogle([[transitRoute([atStep({ transitLine })])]], {
+        estimateMissingTransitFare: true,
+      });
+      await expect(provider.getRoutes({ ...request, mode: 'transit' })).rejects.toMatchObject({
+        code: 'INCOMPLETE_RESULT',
+        message: expect.stringContaining('not confirmed as an AT bus/train'),
+      });
+    },
+  );
+  it('prices outbound and return fare ranges independently without doubling one fare response', async () => {
+    const inbound = transitRoute([atStep()]);
+    inbound.travelAdvisory = { transitFare: { currencyCode: 'NZD', units: 4, nanos: 900000000 } };
+    const { provider } = mockGoogle([[transitRoute([atStep()])], [inbound]], {
+      estimateMissingTransitFare: true,
+    });
+    const result = await provider.getRoutes({
+      ...request,
+      mode: 'transit',
+      roundTrip: true,
+      returnTime: nzWeekday,
+    });
+    expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({ min: 3, max: 7.9 });
+    expect(result.routes[0]!.inbound[0]).toMatchObject({ fare: 4.9, fareSource: 'google' });
+    expect(result.requestCount).toBe(2);
+  });
+  it.each(['first', 'subsequent'] as const)(
+    'rejects the expired snapshot when the %s actual boarding crosses midnight into the review date',
+    async (boardingPosition) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2027-01-31T23:30:00+13:00'));
+      try {
+        const beforeMidnight = atStep({
+          departureTime: new Date('2027-01-31T23:40:00+13:00'),
+          arrivalTime: new Date('2027-01-31T23:50:00+13:00'),
+        });
+        const afterMidnight = atStep({
+          departureTime: new Date('2027-02-01T00:05:00+13:00'),
+          arrivalTime: new Date('2027-02-01T00:15:00+13:00'),
+        });
+        const steps =
+          boardingPosition === 'first' ? [afterMidnight] : [beforeMidnight, afterMidnight];
+        const { provider } = mockGoogle([[transitRoute(steps)]], {
+          estimateMissingTransitFare: true,
+        });
+        await expect(
+          provider.getRoutes({
+            ...request,
+            mode: 'transit',
+            departureTime: new Date('2027-01-31T23:30:00+13:00'),
+          }),
+        ).rejects.toMatchObject({
+          code: 'INCOMPLETE_RESULT',
+          message: expect.stringContaining('snapshot does not cover'),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+  it('uses the actual boarding date when walking starts before the new fare table takes effect', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-31T23:50:00+13:00'));
+    try {
+      const route = transitRoute([
+        { travelMode: 'WALKING', staticDurationMillis: 300000, distanceMeters: 400 },
+        atStep({
+          departureTime: new Date('2026-02-01T00:05:00+13:00'),
+          arrivalTime: new Date('2026-02-01T00:15:00+13:00'),
+        }),
+      ]);
+      const { provider } = mockGoogle([[route]], { estimateMissingTransitFare: true });
+      const result = await provider.getRoutes({
+        ...request,
+        mode: 'transit',
+        departureTime: new Date('2026-01-31T23:50:00+13:00'),
+      });
+      expect(result.routes[0]!.outbound[1]!.fareRange).toMatchObject({ min: 3, max: 7.9 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it.each([true, false])(
+    'retains the date fallback for unknown boarding times (explicit request date %s)',
+    async (explicitDate) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2027-02-01T08:00:00+13:00'));
+      try {
+        const { provider } = mockGoogle([[transitRoute([atStep()])]], {
+          estimateMissingTransitFare: true,
+        });
+        await expect(
+          provider.getRoutes({
+            ...request,
+            mode: 'transit',
+            departureTime: explicitDate ? new Date() : undefined,
+          }),
+        ).rejects.toMatchObject({
+          code: 'INCOMPLETE_RESULT',
+          message: expect.stringContaining('snapshot does not cover'),
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
   it('preserves agency attribution and emits only safe HTTP(S) links', async () => {
     const { provider } = mockGoogle([
       [

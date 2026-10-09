@@ -692,6 +692,29 @@
   height: 24px;
   width: 24px;
 }
+.sc-transit-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--sc-muted);
+  overflow-wrap: anywhere;
+}
+.sc-fare-range-note {
+  display: grid;
+  gap: 5px;
+  margin-top: 9px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--sc-accent);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.sc-fare-range-note strong {
+  color: var(--sc-teal);
+}
 .sc-small-button {
   display: inline-flex;
   align-items: center;
@@ -1358,6 +1381,19 @@
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
 }
+.sc-money.sc-money-range {
+  font-size: 24px;
+  overflow-wrap: anywhere;
+}
+.sc-result-value:has(.sc-money-range) {
+  flex-wrap: wrap;
+}
+.sc-range-ranking-note {
+  margin: 10px 0 14px;
+  color: var(--sc-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
 .sc-result-value > span:last-child {
   font-size: 9px;
   color: var(--sc-muted);
@@ -1415,6 +1451,7 @@
 }
 .sc-result-warning svg {
   margin-top: 1px;
+  flex-shrink: 0;
 }
 .sc-projection {
   display: grid;
@@ -1438,6 +1475,11 @@
   font-size: 18px;
   letter-spacing: -0.4px;
   font-variant-numeric: tabular-nums;
+}
+.sc-projection .sc-projection-range {
+  grid-column: 1 / -1;
+  font-size: 20px;
+  overflow-wrap: anywhere;
 }
 .sc-projection p {
   grid-column: 1/-1;

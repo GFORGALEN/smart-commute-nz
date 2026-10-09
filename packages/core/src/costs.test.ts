@@ -7,6 +7,7 @@ import {
   DEFAULT_SETTINGS,
   type CommuteSettings,
   type JourneyOption,
+  type TransitFareRange,
 } from './index';
 
 const settings: CommuteSettings = { ...DEFAULT_SETTINGS };
@@ -48,6 +49,21 @@ function transitOption(id: string, fare: number, minutes: number, transfers = 0)
     ],
     inbound: [],
   };
+}
+
+function estimatedTransitOption(id: string, min = 3, max = 7.9): JourneyOption {
+  const option = transitOption(id, 0, 40);
+  delete option.outbound[0]!.fare;
+  option.outbound[0]!.fareRange = {
+    min,
+    max,
+    source: 'at-estimate',
+    basis: 'standard-adult',
+    assumptions: ['Adult HOP or contactless fare; zones are not verified.'],
+  };
+  option.outbound[0]!.source = 'google';
+  option.outbound[0]!.estimated = true;
+  return option;
 }
 
 describe('fuel cost', () => {
@@ -266,6 +282,163 @@ describe('deterministic comparison', () => {
   it('rejects empty comparisons and duplicate identifiers', () => {
     expect(() => compareOptions([], settings)).toThrow('At least one');
     expect(() => compareOptions([driveOption(), driveOption()], settings)).toThrow('unique');
+  });
+});
+
+describe('approximate transit fare ranges', () => {
+  const oneWaySettings = { ...settings, roundTrip: false };
+
+  it('keeps fare uncertainty through daily, weekly and monthly projections', () => {
+    const option = estimatedTransitOption('estimated');
+    option.outbound.push({
+      mode: 'train',
+      durationMinutes: 20,
+      fare: 0,
+      transfers: 1,
+      source: 'google',
+      estimated: true,
+    });
+    const result = calculateOption(option, oneWaySettings);
+    expect(result.fareCost).toBe(7.9);
+    expect(result.totalCost).toBe(7.9);
+    expect(result.generalizedCost).toBe(22.9);
+    expect(result.fareCostRange).toEqual({ min: 3, max: 7.9 });
+    expect(result.totalCostRange).toEqual({ min: 3, max: 7.9 });
+    expect(result.dailyCostRange).toEqual({ min: 3, max: 7.9 });
+    expect(result.weeklyCostRange).toEqual({ min: 15, max: 39.5 });
+    expect(result.monthlyCostRange?.min).toBeCloseTo(64.95, 10);
+    expect(result.monthlyCostRange?.max).toBeCloseTo(171.035, 10);
+    expect(result.breakdown.outbound.fareCostRange).toEqual({ min: 3, max: 7.9 });
+    expect(result.warnings).toContain('fare-range-estimate');
+  });
+
+  it('adds independent return ranges, exact fares, driving costs and parking once', () => {
+    const option = estimatedTransitOption('hybrid');
+    option.mode = 'hybrid';
+    option.parkingCost = 2;
+    option.parkingVerified = true;
+    option.outbound.push(
+      {
+        mode: 'drive',
+        distanceKm: 10,
+        durationMinutes: 10,
+        toll: 1,
+        source: 'manual',
+        estimated: false,
+      },
+      { mode: 'train', durationMinutes: 10, fare: 2, source: 'manual', estimated: false },
+    );
+    option.inbound = estimatedTransitOption('return', 4.9, 6.5).outbound;
+    const result = calculateOption(option, {
+      ...settings,
+      fuelPrice: 2,
+      fuelConsumption: 10,
+      maintenancePerKm: 0.1,
+    });
+    expect(result.breakdown.outbound.fareCostRange).toEqual({ min: 5, max: 9.9 });
+    expect(result.breakdown.outbound.totalCostRange).toEqual({ min: 9, max: 13.9 });
+    expect(result.breakdown.inbound.fareCostRange).toEqual({ min: 4.9, max: 6.5 });
+    expect(result.fareCostRange?.min).toBeCloseTo(9.9, 10);
+    expect(result.fareCostRange?.max).toBeCloseTo(16.4, 10);
+    expect(result.totalCostRange?.min).toBeCloseTo(15.9, 10);
+    expect(result.totalCostRange?.max).toBeCloseTo(22.4, 10);
+    expect(result.totalCost).toBeCloseTo(22.4, 10);
+    expect(result.weeklyCostRange?.min).toBeCloseTo(79.5, 10);
+    expect(result.weeklyCostRange?.max).toBeCloseTo(112, 10);
+    expect(result.monthlyCostRange?.min).toBeCloseTo(344.235, 10);
+    expect(result.monthlyCostRange?.max).toBeCloseTo(484.96, 10);
+  });
+
+  it('uses explicit fares, including zero, in preference to an earlier estimate', () => {
+    const option = estimatedTransitOption('overridden');
+    option.outbound[0]!.fare = 0;
+    const result = calculateOption(option, oneWaySettings);
+    expect(result.fareCost).toBe(0);
+    expect(result.fareCostRange).toBeUndefined();
+    expect(result.totalCostRange).toBeUndefined();
+    expect(result.weeklyCostRange).toBeUndefined();
+    expect(result.warnings).not.toContain('fare-range-estimate');
+    option.outbound[0]!.fare = 4.9;
+    expect(calculateOption(option, oneWaySettings).totalCost).toBe(4.9);
+  });
+
+  it('retains the estimate warning for a single possible fare', () => {
+    const result = calculateOption(estimatedTransitOption('citylink', 1, 1), oneWaySettings);
+    expect(result.totalCostRange).toEqual({ min: 1, max: 1 });
+    expect(result.warnings).toContain('fare-range-estimate');
+  });
+
+  it('includes uncertainty only for selected directions', () => {
+    const option = transitOption('exact-outbound', 4.9, 30);
+    option.inbound = estimatedTransitOption('estimated-return').outbound;
+    const result = calculateOption(option, oneWaySettings);
+    expect(result.totalCost).toBe(4.9);
+    expect(result.totalCostRange).toBeUndefined();
+    expect(result.breakdown.inbound.fareCostRange).toBeUndefined();
+    expect(result.warnings).not.toContain('fare-range-estimate');
+    const roundTrip = calculateOption(option, settings);
+    expect(roundTrip.totalCostRange?.min).toBeCloseTo(7.9, 10);
+    expect(roundTrip.totalCostRange?.max).toBeCloseTo(12.8, 10);
+  });
+
+  it('ranks monetary and value comparisons by the estimate upper bound', () => {
+    const approximate = estimatedTransitOption('approximate', 3, 7.9);
+    const exact = transitOption('exact', 4.9, 40);
+    const comparison = compareOptions([approximate, exact], oneWaySettings);
+    expect(comparison.cheapest.id).toBe('exact');
+    expect(comparison.bestValue.id).toBe('exact');
+    expect(comparison.results.map((result) => result.id)).toEqual(['exact', 'approximate']);
+    approximate.outbound[0]!.fare = 3;
+    expect(compareOptions([approximate, exact], oneWaySettings).cheapest.id).toBe('approximate');
+  });
+
+  it('does not treat any unpriced Google bus or train segment as free', () => {
+    const option = estimatedTransitOption('partial');
+    delete option.outbound[0]!.fareRange;
+    expect(() => calculateOption(option, oneWaySettings)).toThrow(
+      'missing fare is not free travel',
+    );
+    option.outbound[0]!.fare = 4.9;
+    option.outbound.push({ mode: 'train', durationMinutes: 20, source: 'google', estimated: true });
+    expect(() => calculateOption(option, oneWaySettings)).toThrow(
+      'missing fare is not free travel',
+    );
+    option.outbound[1]!.fare = 0;
+    expect(calculateOption(option, oneWaySettings).totalCost).toBe(4.9);
+  });
+
+  it('preserves existing manually entered journeys without range outputs', () => {
+    const result = calculateOption(transitOption('manual', 6.5, 30), oneWaySettings);
+    expect(result.totalCost).toBe(6.5);
+    expect(result.fareCostRange).toBeUndefined();
+    expect(result.totalCostRange).toBeUndefined();
+    expect(result.monthlyCostRange).toBeUndefined();
+    expect(result.warnings).not.toContain('fare-range-estimate');
+  });
+
+  it.each([
+    { min: -1, max: 3 },
+    { min: 3, max: -1 },
+    { min: NaN, max: 3 },
+    { min: 3, max: Infinity },
+    { min: 7.9, max: 3 },
+  ])('rejects invalid fare bounds $min to $max', (bounds) => {
+    const option = estimatedTransitOption('invalid');
+    option.outbound[0]!.fareRange = { ...bounds, source: 'at-estimate' };
+    expect(() => calculateOption(option, oneWaySettings)).toThrow();
+  });
+
+  it('rejects unsupported range provenance and projection overflow', () => {
+    const option = estimatedTransitOption('invalid-source');
+    option.outbound[0]!.fareRange = {
+      min: 3,
+      max: 7.9,
+      source: 'unknown',
+    } as unknown as TransitFareRange;
+    expect(() => calculateOption(option, oneWaySettings)).toThrow('source is not supported');
+    expect(() =>
+      calculateOption(estimatedTransitOption('overflow', 3, Number.MAX_VALUE), oneWaySettings),
+    ).toThrow();
   });
 });
 

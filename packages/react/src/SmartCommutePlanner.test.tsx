@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SmartCommutePlanner } from './SmartCommutePlanner';
+import { SmartCommutePlanner, type SmartCommutePlannerProps } from './SmartCommutePlanner';
 import {
   createExampleOptions,
   DEFAULT_SETTINGS,
@@ -10,6 +10,7 @@ import {
 } from '@smart-commute/core';
 
 const google = vi.hoisted(() => ({
+  configure: vi.fn(),
   initializeMap: vi.fn(),
   getRoutes: vi.fn(),
   renderRoute: vi.fn(),
@@ -23,6 +24,9 @@ const google = vi.hoisted(() => ({
 vi.mock('@smart-commute/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@smart-commute/providers')>()),
   GoogleRouteProvider: class {
+    constructor(options: unknown) {
+      google.configure(options);
+    }
     initializeMap = google.initializeMap;
     getRoutes = google.getRoutes;
     renderRoute = google.renderRoute;
@@ -76,9 +80,57 @@ function liveResponse(id = 'google-drive-test', roundTrip = false) {
     requestCount: 1,
   };
 }
-async function renderGooglePlanner() {
+function rangedTransitResponse(roundTrip = false) {
+  const transitLeg = (min: number, max: number, stopCount: number) => ({
+    mode: 'bus' as const,
+    durationMinutes: 25,
+    distanceKm: 10,
+    transfers: 0,
+    source: 'google' as const,
+    estimated: true,
+    fareSource: 'at-estimate' as const,
+    fareRange: {
+      min,
+      max,
+      source: 'at-estimate' as const,
+      basis: 'standard-adult' as const,
+      assumptions: ['Standard adult AT HOP/contactless fare; fare zones are unverified.'],
+    },
+    transit: {
+      stopCount,
+      departureStop: 'Origin bus stop',
+      arrivalStop: 'Destination bus stop',
+      lineName: 'Auckland bus route',
+      lineShortName: '70',
+      agencyNames: ['Auckland Transport'],
+    },
+  });
+  return {
+    routes: [
+      {
+        id: 'google-transit-range',
+        name: 'Google public transport route',
+        mode: 'transit' as const,
+        outbound: [transitLeg(3, 7.9, 12)],
+        inbound: roundTrip ? [transitLeg(4.9, 6.5, 7)] : [],
+        parkingCost: 0,
+        waypoints: [],
+      },
+    ],
+    warnings: ['Google route durations are estimates.'],
+    attribution: 'Google Maps',
+    attributionLinks: [{ label: 'Auckland Transport', url: 'https://at.govt.nz/' }],
+    requestCount: 1,
+  };
+}
+const expectMoneyRange = (element: HTMLElement, min: number, max: number) => {
+  expect(element).toHaveTextContent(min.toFixed(2));
+  expect(element).toHaveTextContent(max.toFixed(2));
+  expect(element.textContent).toMatch(/[–—-]/);
+};
+async function renderGooglePlanner(extraProps: Partial<SmartCommutePlannerProps> = {}) {
   const result = render(
-    <SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />,
+    <SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" {...extraProps} />,
   );
   await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
@@ -88,6 +140,19 @@ async function renderGooglePlanner() {
 const useOneWay = () =>
   fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
 const planRoute = () => fireEvent.click(screen.getByRole('button', { name: 'Plan route' }));
+async function planRangedTransit(
+  roundTrip = false,
+  extraProps: Partial<SmartCommutePlannerProps> = {},
+) {
+  google.getRoutes.mockResolvedValueOnce(rangedTransitResponse(roundTrip));
+  const rendered = await renderGooglePlanner(extraProps);
+  if (!roundTrip)
+    fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
+  fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
+  planRoute();
+  await screen.findByTestId('cost-google-transit-range');
+  return rendered;
+}
 async function addGoogleStop(location: Location) {
   fireEvent.click(screen.getByRole('button', { name: 'Add stop' }));
   await screen.findByLabelText('Search an intermediate stop', { exact: true });
@@ -637,7 +702,9 @@ describe('optional Google provider safeguards', () => {
       'readonly',
     );
     expect(within(editor).getByLabelText('Transfers', { exact: true })).toHaveAttribute('readonly');
-    expect(within(editor).queryByRole('combobox')).not.toBeInTheDocument();
+    expect(
+      within(editor).queryByRole('combobox', { name: 'Segment type' }),
+    ).not.toBeInTheDocument();
     expect(
       within(editor).queryByRole('button', { name: 'Remove segment' }),
     ).not.toBeInTheDocument();
@@ -869,6 +936,236 @@ describe('optional Google provider safeguards', () => {
       expect.objectContaining({ destination: { label: 'Latest destination' } }),
     );
     expect(screen.getByTestId('route-card-google-current')).toBeInTheDocument();
+  });
+});
+
+describe('Google transit fare ranges', () => {
+  it('labels an estimated CityLink fare as approximate and uses the CityLink explanation', async () => {
+    const response = rangedTransitResponse();
+    google.getRoutes.mockResolvedValueOnce({
+      ...response,
+      routes: response.routes.map((route) => ({
+        ...route,
+        outbound: route.outbound.map((leg) => ({
+          ...leg,
+          fareRange: { ...leg.fareRange, min: 0.95, max: 0.95, basis: 'citylink' },
+        })),
+      })),
+    });
+    await renderGooglePlanner();
+    useOneWay();
+    fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
+    planRoute();
+    const cost = await screen.findByTestId('cost-google-transit-range');
+    expect(cost).toHaveTextContent('Approx. $0.95');
+    const card = screen.getByTestId('route-card-google-transit-range');
+    expect(card).toHaveTextContent('Adult CityLink AT HOP/contactless estimate.');
+    expect(card).not.toHaveTextContent('unconfirmed fare zones');
+  });
+
+  it('shows missing Google fare as an adult AT range across the card, projections, comparison and breakdown', async () => {
+    const onRouteSelected = vi.fn<(result: RouteResult) => void>();
+    await planRangedTransit(false, { onRouteSelected });
+    expect(google.configure).toHaveBeenLastCalledWith(
+      expect.objectContaining({ estimateMissingTransitFare: true }),
+    );
+    expectMoneyRange(screen.getByTestId('cost-google-transit-range'), 3, 7.9);
+    expect(google.renderRoute).toHaveBeenLastCalledWith('google-transit-range');
+    expect(google.initializeMap.mock.calls[0]![0].isConnected).toBe(true);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const editor = screen.getByTestId('route-editor-google-transit-range');
+    expect(
+      within(editor).getByText(
+        'Adult AT HOP/contactless estimate with unconfirmed fare zones. Transfer timing can widen the range. Concessions and fare caps are excluded.',
+      ),
+    ).toBeVisible();
+    expect(within(editor).getByText('12 stops')).toBeVisible();
+    const projection = screen
+      .getByText('Your monthly commute')
+      .closest('.sc-projection') as HTMLElement;
+    expectMoneyRange(projection.querySelector('strong')!, 64.95, 171.04);
+    fireEvent.click(screen.getByTestId('route-card-google-transit-range'));
+    expect(onRouteSelected).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        totalCost: 7.9,
+        totalCostRange: { min: 3, max: 7.9 },
+        warnings: expect.arrayContaining(['fare-range-estimate']),
+      }),
+    );
+    goTo('Comparison');
+    const row = within(screen.getByRole('table'))
+      .getByRole('button', { name: 'Google public transport route' })
+      .closest('tr') as HTMLElement;
+    const cells = within(row).getAllByRole('cell');
+    expectMoneyRange(cells[1]!, 3, 7.9);
+    expectMoneyRange(cells[4]!, 15, 39.5);
+    expectMoneyRange(cells[5]!, 64.95, 171.04);
+    goTo('Cost breakdown');
+    expectMoneyRange(document.querySelector('.sc-breakdown-total strong') as HTMLElement, 3, 7.9);
+    expectMoneyRange(
+      screen.getByText('Transport fares').closest('div')!.querySelector('dd')!,
+      3,
+      7.9,
+    );
+    expectMoneyRange(
+      screen
+        .getByText('Weekly', { exact: true })
+        .closest('.sc-budget-number')!
+        .querySelector('strong')!,
+      15,
+      39.5,
+    );
+    expectMoneyRange(
+      screen
+        .getByText('Monthly', { exact: true })
+        .closest('.sc-budget-number')!
+        .querySelector('strong')!,
+      64.95,
+      171.04,
+    );
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a fare range when a manual fare is entered without changing Google geometry or requesting another route', async () => {
+    const onRouteSelected = vi.fn<(result: RouteResult) => void>();
+    await planRangedTransit(false, { onRouteSelected });
+    vi.useFakeTimers();
+    const editor = screen.getByTestId('route-editor-google-transit-range');
+    fireEvent.change(within(editor).getByLabelText('Public transport fare — outbound'), {
+      target: { value: '3.4' },
+    });
+    const cost = screen.getByTestId('cost-google-transit-range');
+    expect(cost).toHaveTextContent('3.40');
+    expect(cost).not.toHaveTextContent('7.90');
+    expect(cost.textContent).not.toMatch(/[–—-]/);
+    expect(within(editor).getByLabelText('Bus time (min)')).toHaveAttribute('readonly');
+    expect(within(editor).getByLabelText('Transfers')).toHaveAttribute('readonly');
+    fireEvent.click(screen.getByTestId('route-card-google-transit-range'));
+    const selected = onRouteSelected.mock.lastCall![0];
+    expect(selected.totalCost).toBe(3.4);
+    expect(selected.totalCostRange).toBeUndefined();
+    expect(selected.warnings).not.toContain('fare-range-estimate');
+    expect(selected.option.outbound[0]).toMatchObject({
+      fare: 3.4,
+      source: 'google',
+      fareSource: 'manual',
+    });
+    expect(selected.option.outbound[0]?.fareRange).toBeUndefined();
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    goTo('Cost breakdown');
+    const fareTotal = screen.getByText('Transport fares').closest('div')!.querySelector('dd')!;
+    expect(fareTotal).toHaveTextContent('3.40');
+    expect(fareTotal.textContent).not.toMatch(/[–—-]/);
+  });
+
+  it('restores the original estimate when a confirmed journey fare is cleared without requesting another route', async () => {
+    const onRouteSelected = vi.fn<(result: RouteResult) => void>();
+    await planRangedTransit(false, { onRouteSelected });
+    vi.useFakeTimers();
+    changeNumber('Public transport fare — outbound', '4.9');
+    expect(screen.getByTestId('cost-google-transit-range')).toHaveTextContent('4.90');
+    changeNumber('Public transport fare — outbound', '');
+    expectMoneyRange(screen.getByTestId('cost-google-transit-range'), 3, 7.9);
+    const input = screen.getByLabelText('Public transport fare — outbound');
+    expect(input).toHaveValue(null);
+    expect(input).not.toHaveAttribute('aria-invalid', 'true');
+    fireEvent.click(screen.getByTestId('route-card-google-transit-range'));
+    const restored = onRouteSelected.mock.lastCall![0];
+    expect(restored.totalCostRange).toEqual({ min: 3, max: 7.9 });
+    expect(restored.warnings).toContain('fare-range-estimate');
+    expect(restored.option.outbound[0]).toMatchObject({
+      source: 'google',
+      fareSource: 'at-estimate',
+      fareRange: { min: 3, max: 7.9 },
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(1200));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+  });
+
+  it('combines outbound and return ranges independently and clears each one only after its fare is overridden', async () => {
+    const onRouteSelected = vi.fn<(result: RouteResult) => void>();
+    await planRangedTransit(true, { onRouteSelected });
+    expectMoneyRange(screen.getByTestId('cost-google-transit-range'), 7.9, 14.4);
+    changeNumber('Public transport fare — outbound', '2');
+    expectMoneyRange(screen.getByTestId('cost-google-transit-range'), 6.9, 8.5);
+    fireEvent.click(screen.getByTestId('route-card-google-transit-range'));
+    const partiallyPriced = onRouteSelected.mock.lastCall![0];
+    expect(partiallyPriced.option.outbound[0]?.fareRange).toBeUndefined();
+    expect(partiallyPriced.option.inbound[0]?.fareRange).toMatchObject({ min: 4.9, max: 6.5 });
+    expect(partiallyPriced.breakdown.outbound.totalCostRange).toBeUndefined();
+    expect(partiallyPriced.breakdown.inbound.totalCostRange).toEqual({ min: 4.9, max: 6.5 });
+    changeNumber('Public transport fare — return', '3');
+    const cost = screen.getByTestId('cost-google-transit-range');
+    expect(cost).toHaveTextContent('5.00');
+    expect(cost.textContent).not.toMatch(/[–—-]/);
+    fireEvent.click(screen.getByTestId('route-card-google-transit-range'));
+    expect(onRouteSelected.mock.lastCall![0].totalCostRange).toBeUndefined();
+    expect(onRouteSelected.mock.lastCall![0].warnings).not.toContain('fare-range-estimate');
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses verified AT zones to replace a range while keeping the Google transit route read-only', async () => {
+    const onRouteSelected = vi.fn<(result: RouteResult) => void>();
+    await planRangedTransit(true, { onRouteSelected });
+    fireEvent.click(screen.getByText('Estimate with AT fare rules', { exact: true }));
+    expect(screen.getByLabelText('Outbound verified zones')).toHaveValue('');
+    expect(screen.getByLabelText('Return verified zones')).toHaveValue('');
+    expect(
+      screen.getByLabelText('I have verified these fare zones in the official AT Journey Planner.'),
+    ).not.toBeChecked();
+    changeNumber('Outbound verified zones', '2');
+    changeNumber('Return verified zones', '1');
+    fireEvent.click(
+      screen.getByLabelText('I have verified these fare zones in the official AT Journey Planner.'),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Apply AT fare estimate' }));
+    const cost = screen.getByTestId('cost-google-transit-range');
+    expect(cost).toHaveTextContent('7.90');
+    expect(cost.textContent).not.toMatch(/[–—-]/);
+    fireEvent.click(screen.getByTestId('route-card-google-transit-range'));
+    const verified = onRouteSelected.mock.lastCall![0];
+    expect(verified.totalCostRange).toBeUndefined();
+    expect(verified.option.outbound[0]).toMatchObject({
+      fare: 4.9,
+      source: 'google',
+      fareSource: 'at-rule',
+    });
+    expect(verified.option.inbound[0]).toMatchObject({
+      fare: 3,
+      source: 'google',
+      fareSource: 'at-rule',
+    });
+    expect(verified.option.outbound[0]?.fareRange).toBeUndefined();
+    expect(verified.option.inbound[0]?.fareRange).toBeUndefined();
+    const editor = screen.getByTestId('route-editor-google-transit-range');
+    expect(within(editor).getAllByLabelText('Bus time (min)')).toHaveLength(2);
+    for (const input of within(editor).getAllByLabelText('Bus time (min)'))
+      expect(input).toHaveAttribute('readonly');
+    expect(
+      within(editor).queryByRole('button', { name: 'Add transit segment' }),
+    ).not.toBeInTheDocument();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a pricing requirement for an unknown transit operator without inventing a free route or disabling the map', async () => {
+    google.getRoutes.mockRejectedValueOnce(
+      new Error(
+        'This transit operator has no supported fare estimate. Enter a verified manual fare.',
+      ),
+    );
+    await renderGooglePlanner();
+    useOneWay();
+    fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
+    planRoute();
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent('Enter a verified manual fare'),
+    );
+    expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
+    expect(screen.queryByText('Your monthly commute')).not.toBeInTheDocument();
+    expect(google.initializeMap.mock.calls[0]![0].isConnected).toBe(true);
+    expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
   });
 });
 

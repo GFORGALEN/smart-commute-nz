@@ -1,7 +1,8 @@
 import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
-import type { JourneyOption, Location, TravelLeg } from '@smart-commute/core';
+import type { JourneyOption, Location, TransitFareRange, TravelLeg } from '@smart-commute/core';
 import type { ProviderMetrics, RouteProvider, RouteRequest, RouteResult } from './types';
 import { RouteProviderError } from './types';
+import { AT_FARE_RULES } from './fares';
 
 type LibraryName = 'maps' | 'core' | 'routes' | 'places' | 'geocoding';
 export type GoogleLibraryLoader = (name: LibraryName) => Promise<unknown>;
@@ -14,7 +15,13 @@ export interface GoogleRouteStep {
   transitDetails?: {
     departureTime?: Date;
     arrivalTime?: Date;
+    departureStop?: { name?: string };
+    arrivalStop?: { name?: string };
+    stopCount?: number;
     transitLine?: {
+      name?: string;
+      /** Official Maps JavaScript Route SDK property (REST uses nameShort). */
+      shortName?: string;
       vehicle?: { vehicleType?: string };
       agencies?: { name?: string; url?: URL | string }[];
     };
@@ -55,6 +62,8 @@ export interface GoogleRouteProviderOptions {
   apiKey?: string;
   /** Advanced traffic routing uses the Pro SKU. Default false. */
   trafficAware?: boolean;
+  /** Opt in to a clearly labelled standard-adult AT range when Google omits a fare. */
+  estimateMissingTransitFare?: boolean;
   /** Injectable SDK loader for deterministic tests without paid requests. */
   loadLibrary?: GoogleLibraryLoader;
   maxRouteRequests?: number;
@@ -187,6 +196,168 @@ function modeOf(step: GoogleRouteStep): TravelLeg['mode'] {
     'UNSUPPORTED',
     'This route contains a transport mode outside the bus/train MVP. Enter its cost manually.',
   );
+}
+
+function dateMillis(date: Date | undefined): number | undefined {
+  const value = date?.getTime();
+  return value !== undefined && Number.isFinite(value) ? value : undefined;
+}
+
+function isATService(step: GoogleRouteStep): boolean {
+  const line = step.transitDetails?.transitLine;
+  // Intercity buses and metro/tram systems can have different fares even when
+  // Google classifies their navigation steps as bus/train.
+  if (
+    !['BUS', 'TROLLEYBUS', 'HEAVY_RAIL', 'COMMUTER_TRAIN', 'RAIL'].includes(
+      line?.vehicle?.vehicleType ?? '',
+    )
+  )
+    return false;
+  return (
+    Boolean(line?.agencies?.length) &&
+    line!.agencies!.every((agency) => {
+      if (/^(Auckland Transport|AT\s*Metro)$/i.test(agency.name?.trim() ?? '')) return true;
+      try {
+        const url = new URL(String(agency.url));
+        return (
+          ['https:', 'http:'].includes(url.protocol) &&
+          (url.hostname === 'at.govt.nz' || url.hostname.endsWith('.at.govt.nz'))
+        );
+      } catch {
+        return false;
+      }
+    })
+  );
+}
+
+function completeNZDFare(fare: GoogleRouteData['travelAdvisory']): number | undefined {
+  const money = fare?.transitFare;
+  if (money?.currencyCode !== 'NZD' || (money.units === undefined && money.nanos === undefined))
+    return undefined;
+  const units = money.units ?? 0;
+  const nanos = money.nanos ?? 0;
+  if (
+    !Number.isInteger(units) ||
+    units < 0 ||
+    !Number.isInteger(nanos) ||
+    nanos < 0 ||
+    nanos >= 1e9
+  )
+    return undefined;
+  const amount = units + nanos / 1e9;
+  return nonnegative(amount) ? amount : undefined;
+}
+
+/** A tariff envelope, not a zone or stop-count prediction. */
+function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): TransitFareRange {
+  const transitSteps = steps.filter((step) => step.travelMode === 'TRANSIT');
+  if (!transitSteps.length || !transitSteps.every(isATService))
+    throw new RouteProviderError(
+      'INCOMPLETE_RESULT',
+      'Google returned a route without a complete NZD fare, and its operator or service is not confirmed as an AT bus/train. Enter a manual fare for this service.',
+    );
+  const dateFormatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Pacific/Auckland',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const fallbackDate = departureTime ?? new Date();
+  // A walking or waiting segment can move the actual boarding into another
+  // tariff period. Validate each known boarding, not just the requested start.
+  const boardingDates = transitSteps.map((step) => {
+    const boarding = step.transitDetails?.departureTime;
+    const parts = dateFormatter.formatToParts(
+      dateMillis(boarding) !== undefined ? boarding! : fallbackDate,
+    );
+    const part = (type: Intl.DateTimeFormatPartTypes) =>
+      parts.find((value) => value.type === type)?.value ?? '';
+    return `${part('year')}-${part('month')}-${part('day')}`;
+  });
+  if (boardingDates.some((date) => date < AT_FARE_RULES.effectiveFrom || date >= '2027-02-01'))
+    throw new RouteProviderError(
+      'INCOMPLETE_RESULT',
+      'The AT fare snapshot does not cover this travel date. Enter a verified fare until the published table is refreshed.',
+    );
+  const boardings = transitSteps.map((step) => ({
+    departure: dateMillis(step.transitDetails?.departureTime),
+    arrival: dateMillis(step.transitDetails?.arrivalTime),
+    cityLink: [
+      step.transitDetails?.transitLine?.name,
+      step.transitDetails?.transitLine?.shortName,
+    ].some((name) => /^city\s*link$/i.test(name?.trim() ?? '')),
+  }));
+  const groups = (conservativeUpper: boolean) => {
+    const journeys: (typeof boardings)[] = [];
+    for (const boarding of boardings) {
+      const current = journeys.at(-1);
+      const previous = current?.at(-1);
+      const start = current?.[0]?.departure;
+      const gap =
+        boarding.departure !== undefined && previous?.arrival !== undefined
+          ? (boarding.departure - previous.arrival) / 60000
+          : undefined;
+      const duration =
+        boarding.arrival !== undefined && start !== undefined
+          ? (boarding.arrival - start) / 60000
+          : undefined;
+      const knownSeparate =
+        (gap !== undefined && gap > AT_FARE_RULES.transferWindowMinutes) ||
+        (duration !== undefined && duration > AT_FARE_RULES.maximumJourneyMinutes);
+      const knownIntegrated =
+        gap !== undefined &&
+        gap >= 0 &&
+        gap <= AT_FARE_RULES.transferWindowMinutes &&
+        duration !== undefined &&
+        duration >= 0 &&
+        duration <= AT_FARE_RULES.maximumJourneyMinutes &&
+        current!.length < 5;
+      if (!current || knownSeparate || (conservativeUpper && !knownIntegrated))
+        journeys.push([boarding]);
+      else current.push(boarding);
+    }
+    return journeys;
+  };
+  const price = (journeys: (typeof boardings)[], upper: boolean) =>
+    Math.round(
+      journeys.reduce(
+        (sum, group) =>
+          sum +
+          (group.every((boarding) => boarding.cityLink)
+            ? AT_FARE_RULES.cityLink.adult
+            : upper
+              ? AT_FARE_RULES.adult.at(-1)!
+              : AT_FARE_RULES.adult[0]),
+        0,
+      ) * 100,
+    ) / 100;
+  const minimumJourneys = groups(false);
+  const maximumJourneys = groups(true);
+  const cityLinkOnly = boardings.every((boarding) => boarding.cityLink);
+  const assumptions = [
+    'Standard adult using the same AT HOP card or contactless card/device, with correct tag-on/tag-off. No concession, cap history or subsidy is applied.',
+    'Fare-zone coverage is unverified. Stop counts describe the route and do not determine fare zones.',
+    `Published AT fare table verified ${AT_FARE_RULES.verifiedOn}: ${AT_FARE_RULES.sourceUrl}`,
+  ];
+  if (maximumJourneys.length > minimumJourneys.length)
+    assumptions.push(
+      'Incomplete transfer timing or unverified transfer eligibility widens the upper bound to separate boarding fares.',
+    );
+  if (boardings.length > 5)
+    assumptions.push(
+      'The upper estimate limits each transfer group to five boardings; this is a conservative estimate, not a verified current journey condition.',
+    );
+  if (minimumJourneys.length > 1)
+    assumptions.push(
+      'Transfers exceeding 30 minutes or journeys exceeding 4 hours are priced as separate journeys.',
+    );
+  return {
+    min: price(minimumJourneys, false),
+    max: price(maximumJourneys, true),
+    source: 'at-estimate',
+    basis: cityLinkOnly ? 'citylink' : 'standard-adult',
+    assumptions,
+  };
 }
 
 /** Maps and route responses are kept only in memory for the active planning session. */
@@ -533,7 +704,11 @@ export class GoogleRouteProvider implements RouteProvider {
     return response.routes;
   }
 
-  private toLegs(route: GoogleRouteData, mode: 'drive' | 'transit'): TravelLeg[] {
+  private toLegs(
+    route: GoogleRouteData,
+    mode: 'drive' | 'transit',
+    departureTime?: Date,
+  ): TravelLeg[] {
     if (!nonnegative(route.durationMillis) || !nonnegative(route.distanceMeters)) {
       throw new RouteProviderError(
         'INCOMPLETE_RESULT',
@@ -565,11 +740,27 @@ export class GoogleRouteProvider implements RouteProvider {
         throw new RouteProviderError('INCOMPLETE_RESULT', 'A transit step has no usable duration.');
       const transit = travelMode === 'bus' || travelMode === 'train';
       const transfers = transit ? (boardings++ > 0 ? 1 : 0) : undefined;
+      const details = step.transitDetails;
       return {
         mode: travelMode,
         distanceKm: nonnegative(step.distanceMeters) ? step.distanceMeters / 1000 : undefined,
         durationMinutes: duration / 60000,
         transfers,
+        transit: transit
+          ? {
+              stopCount:
+                Number.isInteger(details?.stopCount) && nonnegative(details?.stopCount)
+                  ? details.stopCount
+                  : undefined,
+              departureStop: details?.departureStop?.name,
+              arrivalStop: details?.arrivalStop?.name,
+              lineName: details?.transitLine?.name,
+              lineShortName: details?.transitLine?.shortName,
+              agencyNames: details?.transitLine?.agencies?.flatMap((agency) =>
+                agency.name ? [agency.name] : [],
+              ),
+            }
+          : undefined,
         source: 'google',
         estimated: true,
       };
@@ -583,16 +774,30 @@ export class GoogleRouteProvider implements RouteProvider {
         'INCOMPLETE_RESULT',
         'Google transit step durations exceed the route duration.',
       );
-    const fare = route.travelAdvisory?.transitFare;
-    const amount =
-      fare?.currencyCode === 'NZD' ? (fare.units ?? 0) + (fare.nanos ?? 0) / 1e9 : undefined;
+    const amount = completeNZDFare(route.travelAdvisory);
     const firstTransit = legs.find((leg) => leg.mode === 'bus' || leg.mode === 'train');
-    if (firstTransit && nonnegative(amount)) firstTransit.fare = amount;
-    else
+    if (!firstTransit) return legs;
+    if (nonnegative(amount)) {
+      firstTransit.fare = amount;
+      firstTransit.fareSource = 'google';
+    } else if (this.options.estimateMissingTransitFare) {
+      firstTransit.fareRange = estimateATFare(steps, departureTime);
+      firstTransit.fareSource = 'at-estimate';
+    } else {
       throw new RouteProviderError(
         'INCOMPLETE_RESULT',
         'Google did not return a complete NZD fare. Enter a manual journey fare or use AT rules with a verified zone count; missing fare is not free travel.',
       );
+    }
+    // Google quotes one whole-direction fare; the range also covers the whole
+    // direction. Explicit zeroes mean these boardings are already included,
+    // never that a missing fare was silently interpreted as free travel.
+    for (const leg of legs) {
+      if (leg !== firstTransit && (leg.mode === 'bus' || leg.mode === 'train')) {
+        leg.fare = 0;
+        leg.fareSource = firstTransit.fareSource;
+      }
+    }
     return legs;
   }
 
@@ -710,12 +915,16 @@ export class GoogleRouteProvider implements RouteProvider {
         warnings.push(...(route.warnings ?? []));
         const inboundRoute = inbound[0];
         if (inboundRoute) warnings.push(...(inboundRoute.warnings ?? []));
+        const outboundLegs = this.toLegs(route, request.mode, request.departureTime);
+        const inboundLegs = inboundRoute
+          ? this.toLegs(inboundRoute, request.mode, request.returnTime)
+          : [];
         return {
           id,
           name: route.description ?? `Google ${request.mode} route ${index + 1}`,
           mode: request.mode,
-          outbound: this.toLegs(route, request.mode),
-          inbound: inboundRoute ? this.toLegs(inboundRoute, request.mode) : [],
+          outbound: outboundLegs,
+          inbound: inboundLegs,
           parkingCost: 0,
           parkingVerified: false,
           waypoints,

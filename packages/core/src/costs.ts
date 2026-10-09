@@ -1,5 +1,6 @@
 import type {
   CommuteSettings,
+  CostRange,
   JourneyOption,
   LegTotals,
   Location,
@@ -36,6 +37,13 @@ function nonEmpty(value: string, field: string): void {
   }
 }
 
+function validateCostRange(range: CostRange, field: string): void {
+  if (!range || typeof range !== 'object') throw new TypeError(`${field} must be a cost range.`);
+  nonNegative(range.min, `${field}.min`);
+  nonNegative(range.max, `${field}.max`);
+  if (range.min > range.max) throw new RangeError(`${field}.min must not exceed max.`);
+}
+
 function validateLocation(location: Location, field: string): void {
   if (!location || typeof location !== 'object') {
     throw new TypeError(`${field} must be a location.`);
@@ -56,6 +64,13 @@ function validateLeg(leg: TravelLeg, field: string): void {
   if (!leg || typeof leg !== 'object') throw new TypeError(`${field} must be a travel leg.`);
   if (!travelModes.has(leg.mode)) throw new TypeError(`${field}.mode is not supported.`);
   if (!sources.has(leg.source)) throw new TypeError(`${field}.source is not supported.`);
+  if (
+    leg.fareSource !== undefined &&
+    !sources.has(leg.fareSource) &&
+    leg.fareSource !== 'at-estimate'
+  ) {
+    throw new TypeError(`${field}.fareSource is not supported.`);
+  }
   if (typeof leg.estimated !== 'boolean') {
     throw new TypeError(`${field}.estimated must be a boolean.`);
   }
@@ -69,6 +84,32 @@ function validateLeg(leg: TravelLeg, field: string): void {
   }
   if (leg.mode === 'drive' && leg.distanceKm === undefined) {
     throw new TypeError(`${field}.distanceKm is required for driving.`);
+  }
+  if (leg.fareRange !== undefined) {
+    validateCostRange(leg.fareRange, `${field}.fareRange`);
+    if (leg.fareRange.source !== 'at-estimate') {
+      throw new TypeError(`${field}.fareRange.source is not supported.`);
+    }
+    if (
+      leg.fareRange.basis !== undefined &&
+      !['standard-adult', 'citylink'].includes(leg.fareRange.basis)
+    ) {
+      throw new TypeError(`${field}.fareRange.basis is not supported.`);
+    }
+    if (leg.fareRange.assumptions !== undefined) {
+      if (!Array.isArray(leg.fareRange.assumptions)) {
+        throw new TypeError(`${field}.fareRange.assumptions must be an array.`);
+      }
+      leg.fareRange.assumptions.forEach((assumption, index) =>
+        nonEmpty(assumption, `${field}.fareRange.assumptions[${index}]`),
+      );
+    }
+  }
+  if (leg.transit?.stopCount !== undefined) {
+    nonNegative(leg.transit.stopCount, `${field}.transit.stopCount`);
+    if (!Number.isInteger(leg.transit.stopCount)) {
+      throw new RangeError(`${field}.transit.stopCount must be a whole number.`);
+    }
   }
 }
 
@@ -141,7 +182,19 @@ function zeroTotals(): LegTotals {
 
 function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals {
   const result = zeroTotals();
+  let minimumFareCost = 0;
+  let hasFareRange = false;
   for (const leg of legs) {
+    if (
+      leg.source === 'google' &&
+      (leg.mode === 'bus' || leg.mode === 'train') &&
+      leg.fare === undefined &&
+      leg.fareRange === undefined
+    ) {
+      throw new TypeError(
+        'Google transit legs require a fare or fare range; missing fare is not free travel.',
+      );
+    }
     const distanceKm = leg.distanceKm ?? 0;
     if (leg.mode === 'drive') {
       result.fuelCost += calculateFuelCost(
@@ -151,14 +204,35 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
       );
       result.maintenanceCost += distanceKm * settings.maintenancePerKm;
     }
-    result.fareCost += leg.fare ?? 0;
+    result.fareCost += leg.fare ?? leg.fareRange?.max ?? 0;
+    minimumFareCost += leg.fare ?? leg.fareRange?.min ?? 0;
+    if (leg.fare === undefined && leg.fareRange !== undefined) hasFareRange = true;
     result.tollCost += leg.toll ?? 0;
     result.totalMinutes += leg.durationMinutes;
     result.distanceKm += distanceKm;
     result.transfers += leg.transfers ?? 0;
   }
   result.totalCost = result.fuelCost + result.fareCost + result.tollCost + result.maintenanceCost;
-  for (const [key, value] of Object.entries(result)) nonNegative(value, `calculated ${key}`);
+  if (hasFareRange) {
+    result.fareCostRange = { min: minimumFareCost, max: result.fareCost };
+    result.totalCostRange = {
+      min: result.fuelCost + minimumFareCost + result.tollCost + result.maintenanceCost,
+      max: result.totalCost,
+    };
+    validateCostRange(result.fareCostRange, 'calculated fareCostRange');
+    validateCostRange(result.totalCostRange, 'calculated totalCostRange');
+  }
+  for (const key of [
+    'fuelCost',
+    'fareCost',
+    'tollCost',
+    'maintenanceCost',
+    'totalMinutes',
+    'distanceKm',
+    'transfers',
+    'totalCost',
+  ] as const)
+    nonNegative(result[key], `calculated ${key}`);
   return result;
 }
 
@@ -187,6 +261,9 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
     ? [...option.outbound, ...option.inbound]
     : option.outbound;
   if (includedLegs.some((leg) => leg.estimated)) warnings.push('estimated-data');
+  if (includedLegs.some((leg) => leg.fare === undefined && leg.fareRange !== undefined)) {
+    warnings.push('fare-range-estimate');
+  }
   if ((option.mode !== 'transit' || option.parkingCost > 0) && option.parkingVerified !== true) {
     warnings.push('unverified-parking');
   }
@@ -212,6 +289,40 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
     option,
     breakdown: { outbound, inbound },
   };
+  if (outbound.fareCostRange !== undefined || inbound.fareCostRange !== undefined) {
+    result.fareCostRange = {
+      min:
+        (outbound.fareCostRange?.min ?? outbound.fareCost) +
+        (inbound.fareCostRange?.min ?? inbound.fareCost),
+      max: fareCost,
+    };
+    result.totalCostRange = {
+      min:
+        (outbound.totalCostRange?.min ?? outbound.totalCost) +
+        (inbound.totalCostRange?.min ?? inbound.totalCost) +
+        option.parkingCost,
+      max: totalCost,
+    };
+    result.dailyCostRange = { ...result.totalCostRange };
+    result.weeklyCostRange = {
+      min: result.totalCostRange.min * settings.daysPerWeek,
+      max: weeklyCost,
+    };
+    result.monthlyCostRange = {
+      min: result.weeklyCostRange.min * settings.weeksPerMonth,
+      max: monthlyCost,
+    };
+    for (const key of [
+      'fareCostRange',
+      'totalCostRange',
+      'dailyCostRange',
+      'weeklyCostRange',
+      'monthlyCostRange',
+    ] as const) {
+      const range = result[key];
+      if (range !== undefined) validateCostRange(range, `calculated ${key}`);
+    }
+  }
   for (const key of [
     'totalCost',
     'fuelCost',

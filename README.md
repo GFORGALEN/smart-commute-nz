@@ -94,12 +94,21 @@ reverse the order. Google transit cannot accept intermediate stops, so the plann
 asks you to remove them or switch to driving. The transit editor links to AT Journey
 Planner for official fare verification. A GTFS key alone cannot supply missing fares;
 see the [AT integration plan](docs/AT_INTEGRATION.md).
+When Google omits a usable NZD fare for a recognized AT bus/train, the planner keeps
+the route and shows a standard adult HOP/contactless fare range. A normal integrated
+journey is NZ$3.00–7.90; uncertain or separate transfers can widen it, and CityLink
+uses its own tariff. Actual stop counts, lines and boarding/alighting stops are
+displayed without treating stop counts as fare zones. Enter a confirmed whole-journey
+fare or apply verified AT zones to replace the range; clearing the fare restores it.
+Cost rankings use the upper end and disclose that assumption. Concessions and fare-cap
+history are excluded from automatic ranges.
 Never enable
 billing or purchase a service without the account owner's consent. No paid service
 was enabled by this project. A limited, owner-authorized live check on 9 October 2026
 verified map loading, driving alternatives, address search and geocoding. Transit
-returned routes but incomplete NZD fare information, so the app requires manual
-pricing or verified AT estimates. A further bounded check verified automatic map
+returned routes but incomplete NZD fare information; the initial version required
+manual pricing. The updated AT range flow was verified with six real transit
+alternatives and stop metadata. A further bounded check verified automatic map
 loading, traffic-aware one-way driving, destination-triggered route refresh and
 immediate fuel-cost changes without another route request. Broader coverage and
 return alternatives still need live verification. The public demo uses an owner-authorized
@@ -109,7 +118,8 @@ is not committed. Browser users can inspect the built key, so Google Cloud refer
 restrictions remain necessary. Opening the online planner loads Google services
 automatically and can generate billable events; route planning and follow-up refreshes
 can generate additional requests. Initialization or route errors leave Manual Mode
-available, and unavailable transit prices require manual fares or verified AT estimates.
+available. Unpriced services outside recognized AT bus/train routes require manual
+fares; they never become free journeys.
 
 ## Reuse as a component or widget
 
