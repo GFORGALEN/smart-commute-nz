@@ -299,6 +299,29 @@ describe('deterministic comparison', () => {
     expect(options.map((option) => option.id)).toEqual(['cheap', 'fast', 'direct', 'balanced']);
   });
 
+  it('selects the shortest distance, ranking routes with missing distances last', () => {
+    const short = driveOption({ id: 'short' });
+    short.outbound[0]!.distanceKm = 12;
+    const long = driveOption({ id: 'long' });
+    long.outbound[0]!.distanceKm = 25;
+    const unknown = transitOption('unknown', 2, 40);
+    const comparison = compareOptions([long, unknown, short], oneWaySettings);
+    expect(comparison.shortest.id).toBe('short');
+    expect(comparison.shortest.distanceComplete).toBe(true);
+    expect(comparison.results.find((result) => result.id === 'unknown')!.distanceComplete).toBe(
+      false,
+    );
+    // An incomplete route is still the shortest when nothing else is known.
+    expect(compareOptions([unknown], oneWaySettings).shortest.id).toBe('unknown');
+  });
+
+  it('breaks shortest-distance ties using time', () => {
+    const slower = driveOption({ id: 'slower' });
+    slower.outbound[0]!.durationMinutes = 50;
+    const faster = driveOption({ id: 'faster' });
+    expect(compareOptions([slower, faster], settings).shortest.id).toBe('faster');
+  });
+
   it('responds to changed fares and time value', () => {
     const options = [transitOption('bus', 10, 60), transitOption('train', 20, 20)];
     expect(compareOptions(options, { ...oneWaySettings, valueOfTime: 0 }).bestValue.id).toBe('bus');
@@ -313,7 +336,13 @@ describe('deterministic comparison', () => {
     const options = [transitOption('b', 5, 30), transitOption('a', 5, 30)];
     const first = compareOptions(options, oneWaySettings);
     const second = compareOptions([...options].reverse(), oneWaySettings);
-    for (const key of ['cheapest', 'fastest', 'fewestTransfers', 'bestValue'] as const) {
+    for (const key of [
+      'cheapest',
+      'fastest',
+      'fewestTransfers',
+      'bestValue',
+      'shortest',
+    ] as const) {
       expect(first[key].id).toBe('a');
       expect(second[key].id).toBe('a');
     }

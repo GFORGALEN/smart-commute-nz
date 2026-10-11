@@ -2039,7 +2039,7 @@ label.sc-route-measurements {
 }
 .sc-comparison-highlights {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--sc-space-3);
 }
 .sc-comparison-highlights button {
@@ -2487,7 +2487,7 @@ label.sc-route-measurements {
 }
 @media (min-width: 900px) and (max-width: 1179px) {
   .sc-comparison-highlights {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

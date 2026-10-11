@@ -296,6 +296,9 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
   const includedLegs = settings.roundTrip
     ? [...option.outbound, ...option.inbound]
     : option.outbound;
+  const distanceComplete = includedLegs.every(
+    (leg) => leg.mode === 'wait' || leg.mode === 'parking' || leg.distanceKm !== undefined,
+  );
   if (includedLegs.some((leg) => leg.estimated)) warnings.push('estimated-data');
   if (includedLegs.some((leg) => leg.fare === undefined && leg.fareRange !== undefined)) {
     warnings.push('fare-range-estimate');
@@ -318,6 +321,7 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
     maintenanceCost,
     totalMinutes,
     distanceKm,
+    distanceComplete,
     transfers,
     dailyCost: totalCost,
     weeklyCost,
@@ -382,7 +386,7 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
   return result;
 }
 
-type RankingMetric = 'totalCost' | 'totalMinutes' | 'transfers' | 'generalizedCost';
+type RankingMetric = 'totalCost' | 'totalMinutes' | 'transfers' | 'generalizedCost' | 'distanceKm';
 
 function rankBy(...metrics: RankingMetric[]): (left: RouteResult, right: RouteResult) => number {
   return (left, right) => {
@@ -417,5 +421,10 @@ export function compareOptions(
   const bestValue = [...results].sort(
     rankBy('generalizedCost', 'totalCost', 'totalMinutes', 'transfers'),
   )[0]!;
-  return { results, cheapest, fastest, fewestTransfers, bestValue };
+  const byDistance = rankBy('distanceKm', 'totalMinutes', 'totalCost', 'transfers');
+  const shortest = [...results].sort(
+    (left, right) =>
+      Number(right.distanceComplete) - Number(left.distanceComplete) || byDistance(left, right),
+  )[0]!;
+  return { results, cheapest, fastest, fewestTransfers, bestValue, shortest };
 }

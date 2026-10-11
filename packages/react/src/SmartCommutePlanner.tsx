@@ -363,7 +363,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const summaryRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLElement>(null);
   const [showAllRoutes, setShowAllRoutes] = useState(false);
-  const [sortBy, setSortBy] = useState<'cost' | 'time' | 'value'>('cost');
+  const [sortBy, setSortBy] = useState<'cost' | 'time' | 'distance' | 'value'>('cost');
   const [manualRequested, setManualRequested] = useState(false);
   const [googleStatus, setGoogleStatus] = useState<
     'idle' | 'loading' | 'ready' | 'routes' | 'error'
@@ -521,13 +521,18 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const distinctCards: RouteResult[] = [];
   const similarCards: RouteResult[] = [];
   const seenCardDetails = new Set<string>();
-  // Core ranks by cost; people can reorder by time or by cost plus their time value.
+  // Core ranks by cost; people can reorder by time, distance or cost plus their time value.
+  // Routes missing a leg distance sort after complete ones, as their total is only a floor.
   const sortedResults = [...(comparison.result?.results ?? [])].sort((left, right) =>
     sortBy === 'time'
       ? left.totalMinutes - right.totalMinutes || left.totalCost - right.totalCost
-      : sortBy === 'value'
-        ? left.generalizedCost - right.generalizedCost
-        : 0,
+      : sortBy === 'distance'
+        ? Number(right.distanceComplete) - Number(left.distanceComplete) ||
+          left.distanceKm - right.distanceKm ||
+          left.totalMinutes - right.totalMinutes
+        : sortBy === 'value'
+          ? left.generalizedCost - right.generalizedCost
+          : 0,
   );
   for (const result of sortedResults) {
     const fingerprint = JSON.stringify([
@@ -564,7 +569,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       ? 'cityLinkFareRangeHelp'
       : 'fareRangeHelp';
   };
-  const rankingLabel = (kind: 'cheapest' | 'fastest' | 'fewestTransfers' | 'bestValue') =>
+  const rankingLabel = (
+    kind: 'cheapest' | 'fastest' | 'fewestTransfers' | 'bestValue' | 'shortest',
+  ) =>
     t(
       hasFareRanges && kind === 'cheapest'
         ? 'budgetCheapest'
@@ -2713,6 +2720,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     (comparison.result?.results ?? []).every(
       (other) => other.id === result.id || other[metric] > result[metric],
     );
+  // A route with a missing leg distance cannot be called shortest, nor outrank one that can.
+  const uniquelyShortest = (result: RouteResult) =>
+    result.distanceComplete &&
+    (comparison.result?.results ?? []).every(
+      (other) =>
+        other.id === result.id || !other.distanceComplete || other.distanceKm > result.distanceKm,
+    );
 
   // The selected option expands in place, so its figures are never stated twice.
   const renderSelectedDetail = (result: RouteResult) => (
@@ -2804,14 +2818,21 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 {t('sortBy')}
               </span>
               <div className="sc-sort" role="group" aria-label={t('sortBy')}>
-                {(['cost', 'time', 'value'] as const).map((key) => (
+                {(
+                  [
+                    ['cost', 'sortCost'],
+                    ['time', 'sortTime'],
+                    ['distance', 'sortDistance'],
+                    ['value', 'sortValue'],
+                  ] as const
+                ).map(([key, label]) => (
                   <button
                     key={key}
                     aria-pressed={sortBy === key}
                     className={sortBy === key ? 'is-active' : ''}
                     onClick={() => setSortBy(key)}
                   >
-                    {t(key === 'cost' ? 'sortCost' : key === 'time' ? 'sortTime' : 'sortValue')}
+                    {t(label)}
                   </button>
                 ))}
               </div>
@@ -2862,6 +2883,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                       {t('fastest')}
                     </span>
                   ),
+                comparison.result?.shortest.id === result.id && uniquelyShortest(result) && (
+                  <span className="sc-tag-primary" key="shortest">
+                    {t('shortest')}
+                  </span>
+                ),
                 comparison.result?.bestValue.id === result.id && (
                   <span className="sc-tag-quiet" key="best-value">
                     {rankingLabel('bestValue')}
@@ -3029,25 +3055,32 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       {comparison.result ? (
         <>
           <div className="sc-comparison-highlights">
-            {(['cheapest', 'fastest', 'fewestTransfers', 'bestValue'] as const).map((kind) => {
-              const result = comparison.result![kind];
-              return (
-                <button key={kind} onClick={() => selectResult(result)}>
-                  <span>{rankingLabel(kind)}</span>
-                  <strong>{nameOf(result)}</strong>
-                  <small>
-                    {kind === 'fastest'
-                      ? t('minutes', { count: shortNumber(result.totalMinutes) })
-                      : kind === 'fewestTransfers'
-                        ? t('transferCount', { count: result.transfers })
-                        : moneyWithRange(
-                            kind === 'bestValue' ? result.generalizedCost : result.totalCost,
-                            kind === 'bestValue' ? generalizedRange(result) : result.totalCostRange,
-                          )}
-                  </small>
-                </button>
-              );
-            })}
+            {(['cheapest', 'fastest', 'shortest', 'fewestTransfers', 'bestValue'] as const).map(
+              (kind) => {
+                const result = comparison.result![kind];
+                if (kind === 'shortest' && !result.distanceComplete) return null;
+                return (
+                  <button key={kind} onClick={() => selectResult(result)}>
+                    <span>{rankingLabel(kind)}</span>
+                    <strong>{nameOf(result)}</strong>
+                    <small>
+                      {kind === 'fastest'
+                        ? t('minutes', { count: shortNumber(result.totalMinutes) })
+                        : kind === 'shortest'
+                          ? t('km', { count: shortNumber(result.distanceKm) })
+                          : kind === 'fewestTransfers'
+                            ? t('transferCount', { count: result.transfers })
+                            : moneyWithRange(
+                                kind === 'bestValue' ? result.generalizedCost : result.totalCost,
+                                kind === 'bestValue'
+                                  ? generalizedRange(result)
+                                  : result.totalCostRange,
+                              )}
+                    </small>
+                  </button>
+                );
+              },
+            )}
           </div>
           <p className="sc-scope-note">
             {t('amountsInNzd')} · {tripScope}
@@ -3061,6 +3094,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                       'route',
                       'costPerCommute',
                       'time',
+                      'distanceLabel',
                       'transfers',
                       'weekly',
                       'monthly',
@@ -3085,6 +3119,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                       <strong>{moneyWithRange(result.totalCost, result.totalCostRange)}</strong>
                     </td>
                     <td>{t('minutes', { count: shortNumber(result.totalMinutes) })}</td>
+                    <td>{distanceText(result)}</td>
                     <td>{result.transfers}</td>
                     <td>{moneyWithRange(result.weeklyCost, result.weeklyCostRange)}</td>
                     <td>{moneyWithRange(result.monthlyCost, result.monthlyCostRange)}</td>

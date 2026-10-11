@@ -114,6 +114,8 @@ export interface RouteResult {
   maintenanceCost: number;
   totalMinutes: number;
   distanceKm: number;
+  /** False when a moving leg has no distance, so distanceKm is only a lower bound. */
+  distanceComplete: boolean;
   transfers: number;
   dailyCost: number;
   dailyCostRange?: CostRange;
@@ -134,4 +136,6 @@ export interface RouteComparison {
   fastest: RouteResult;
   fewestTransfers: RouteResult;
   bestValue: RouteResult;
+  /** Shortest distance; routes with a missing leg distance rank after every complete one. */
+  shortest: RouteResult;
 }

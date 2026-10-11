@@ -1035,8 +1035,8 @@ describe('Google transit fare ranges', () => {
       .closest('tr') as HTMLElement;
     const cells = within(row).getAllByRole('cell');
     expectMoneyRange(cells[1]!, 3, 7.9);
-    expectMoneyRange(cells[4]!, 15, 39.5);
-    expectMoneyRange(cells[5]!, 64.95, 171.04);
+    expectMoneyRange(cells[5]!, 15, 39.5);
+    expectMoneyRange(cells[6]!, 64.95, 171.04);
     goTo('Cost breakdown');
     expectMoneyRange(document.querySelector('.sc-breakdown-total strong') as HTMLElement, 3, 7.9);
     expectMoneyRange(
@@ -1561,6 +1561,19 @@ describe('result meaning and input feedback', () => {
     expect(order()[0]).toBe('transit');
     fireEvent.click(screen.getByRole('button', { name: 'Time' }));
     expect(order()[0]).toBe('drive');
+  });
+
+  it('reorders by distance and labels only a fully measured route as shortest', () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    const order = () =>
+      screen
+        .getAllByTestId(/^route-card-/)
+        .map((card) => card.dataset.testid?.replace('route-card-', ''));
+    fireEvent.click(screen.getByRole('button', { name: 'Distance' }));
+    // Only the full drive has every leg distance; the others are lower bounds and sort after it.
+    expect(order()[0]).toBe('drive');
+    expect(screen.getByTestId('route-card-drive')).toHaveTextContent('Shortest distance');
+    expect(screen.getByTestId('route-card-hybrid')).not.toHaveTextContent('Shortest distance');
   });
 });
 
