@@ -20,3 +20,29 @@ payment account. Integration checks using a paid API require the owner's approva
 
 The project uses the MIT license. External data and Google service content keep
 their respective terms; this license does not grant redistribution rights to them.
+
+## Code conventions
+
+Write identifiers and code comments in English; user-facing text goes through the i18n
+resources. Name code, scripts and tests after the capability they serve, not after a
+release or phase number. Extract a shared helper only once two real callers need it.
+Keep TypeScript `strict`; if an escape hatch such as `any` is unavoidable, scope it
+locally and comment why. Files are UTF-8 with LF line endings and a final newline
+(see `.editorconfig`); Prettier owns formatting and ESLint owns code-quality rules.
+
+## Dependencies
+
+`.npmrc` installs from the public npm registry with lifecycle scripts disabled, exact
+versions, strict engine/peer checks and a 30-day minimum release age. Keep it that way:
+
+- Before adding a dependency, note its purpose, why a few lines of local code would not
+  do, maintenance status, exact version, license and known vulnerabilities in the PR.
+- Pin direct dependencies to exact versions and commit the matching `package-lock.json`.
+  Regenerate the license inventory with `node scripts/license-notices.mjs`.
+- Wait 30 days before adopting a new release unless it is a reviewed security fix;
+  record the reason when making that exception.
+- Never run `npm audit fix --force`. Review the advisory and make the smallest explicit
+  upgrade instead.
+- If a package genuinely needs its install script, document the exact package, version
+  and command and run it explicitly rather than re-enabling scripts globally.
+- GitHub Actions are pinned to full commit SHAs with the release tag in a comment.
