@@ -1,11 +1,11 @@
-# Render Blueprint: the planner as a static site built from this branch.
+# Render Blueprint: the planner as a static site built from main.
 # The Google browser key is entered in the Render dashboard (sync: false) and never committed.
 # Add the Render URL to the key's HTTP referrer restrictions, or the online map is refused.
 services:
   - type: web
     name: smart-commute-nz
     runtime: static
-    branch: feature/planner-ui-refresh
+    branch: main
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
     envVars:
