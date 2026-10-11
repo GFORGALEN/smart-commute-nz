@@ -67,7 +67,12 @@ and availability must be checked.
 For those assumptions, full driving fuel is **NZ$5.453 one way / NZ$10.906 return**;
 hybrid fuel plus fare is **NZ$9.205 one way / NZ$18.410 return**; full transit is
 **NZ$6.50 one way / NZ$13.00 return**. Displayed currency rounds only at presentation.
-These totals omit tolls and parking unless you enter them. Defaults are not today's
+Driving also adds vehicle upkeep at a default NZ$0.08/km: the IRD 2025-26 Tier 2 petrol
+running cost (NZ$0.37/km, checked 11 October 2026) minus that example fuel cost. The example
+drive therefore totals **NZ$13.946 return** and the hybrid **NZ$20.81 return**, so public
+transport is the lowest-cost default. With live Google traffic, the planner compares the
+traffic-aware time with Google's free-flow time and adds the delay's fuel at a default
+0.8 L/hour (editable in Settings). These totals omit tolls and parking unless you enter them. Defaults are not today's
 market petrol price and do not promise legal free parking.
 
 ## Optional Google Maps

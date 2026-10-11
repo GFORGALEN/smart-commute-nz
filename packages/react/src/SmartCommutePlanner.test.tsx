@@ -1,4 +1,4 @@
-﻿import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmartCommutePlanner, type SmartCommutePlannerProps } from './SmartCommutePlanner';
@@ -243,8 +243,8 @@ afterEach(() => {
 describe('SmartCommutePlanner offline workflows', () => {
   it('calculates three disclosed examples without making a map request', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
-    expect(screen.getByTestId('cost-hybrid')).toHaveTextContent('18.41');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
+    expect(screen.getByTestId('cost-hybrid')).toHaveTextContent('20.81');
     expect(screen.getByTestId('cost-transit')).toHaveTextContent('13.00');
     expect(
       screen.getByText(/editable assumptions, not live Google or Auckland Transport data/),
@@ -257,11 +257,11 @@ describe('SmartCommutePlanner offline workflows', () => {
   it('updates fuel costs and the deterministic cheapest recommendation', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     changeNumber('Fuel price (NZ$/L)', '5');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('15.58');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('18.62');
     expect(within(screen.getByTestId('route-card-transit')).getByText('Lowest cost')).toBeVisible();
     expect(screen.getByText(/50 minutes longer/)).toBeVisible();
     changeNumber('Fuel consumption (L/100km)', '10');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('19.00');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('22.04');
   });
 
   it('uses independently edited transit fares for each direction', () => {
@@ -291,7 +291,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('excluded from round-trip comparisons');
     expect(screen.getByRole('alert')).toHaveTextContent('Bus / public transport');
     expect(screen.getByText('Your monthly commute').closest('.sc-projection')).toHaveTextContent(
-      '236.11',
+      '301.93',
     );
     goTo('Comparison');
     expect(
@@ -374,7 +374,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     fireEvent.click(acknowledgment);
     changeNumber('Station parking per commute (NZ$)', '8');
     expect(acknowledgment).not.toBeChecked();
-    expect(screen.getByTestId('cost-hybrid')).toHaveTextContent('26.41');
+    expect(screen.getByTestId('cost-hybrid')).toHaveTextContent('28.81');
   });
 
   it('excludes an old free SuperGold fare after crossing the tag-on threshold until explicitly reapplied', () => {
@@ -389,7 +389,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('excluded until you apply a new estimate');
     expect(within(screen.getByTestId('route-card-drive')).getByText('Lowest cost')).toBeVisible();
     expect(screen.getByText('Your monthly commute').closest('.sc-projection')).toHaveTextContent(
-      '236.11',
+      '301.93',
     );
     expect(screen.getByText(/Your estimated tag-on time has changed/)).toBeVisible();
     fireEvent.click(screen.getByRole('button', { name: 'Apply AT fare estimate' }));
@@ -427,7 +427,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     expect(screen.queryByTestId('route-card-transit')).not.toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('restored without verification');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
   });
 
   it('preserves AT provenance when a non-fare input changes so an old discount cannot become a manual assumption', () => {
@@ -458,7 +458,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     expect(screen.queryByTestId('cost-drive')).not.toBeInTheDocument();
     expect(localStorage.getItem('smart-commute-nz:v1')).toBe(lastValid);
     changeNumber('Fuel price (NZ$/L)', '0');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('0.00');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('3.04');
   });
 
   it('saves a waypoint as a preference and restores it with fuel settings', () => {
@@ -491,7 +491,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     });
     expect(screen.getByRole('tab', { name: '路线规划' })).toBeVisible();
     expect(screen.getByLabelText('汽油单价 (NZ$/L)', { exact: true })).toHaveValue(3.5);
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
     expect(screen.getByText(/均为可编辑的假设/)).toBeVisible();
   });
 
@@ -502,7 +502,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     expect(onRouteSelected).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'hybrid',
-        totalCost: expect.closeTo(18.41, 4),
+        totalCost: expect.closeTo(20.81, 4),
         warnings: expect.arrayContaining(['unverified-parking']),
       }),
     );
@@ -513,7 +513,7 @@ describe('SmartCommutePlanner offline workflows', () => {
   it('recovers safely from corrupt local storage', () => {
     localStorage.setItem('smart-commute-nz:v1', '{broken');
     render(<SmartCommutePlanner {...defaultProps} />);
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
   });
 
   it('compares a custom driving alternative and allows saved route restoration', () => {
@@ -588,7 +588,7 @@ describe('optional Google provider safeguards', () => {
         'Google Maps could not complete this request',
       ),
     );
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
     expect(screen.getByLabelText('Outbound distance (km)', { exact: true })).toBeEnabled();
     expect(google.getRoutes).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Reconnect Google map' }));
@@ -774,17 +774,17 @@ describe('optional Google provider safeguards', () => {
     useOneWay();
     planRoute();
     await waitFor(() =>
-      expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('2.87'),
+      expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('3.67'),
     );
     vi.useFakeTimers();
     changeNumber('Fuel price (NZ$/L)', '5');
-    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('4.10');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('4.90');
     changeNumber('Fuel consumption (L/100km)', '10');
-    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('5.00');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('5.80');
     changeNumber('Parking per commute (NZ$)', '3');
-    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('8.00');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('8.80');
     changeNumber('Outbound tolls (NZ$)', '2');
-    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('10.00');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('10.80');
     await act(async () => vi.advanceTimersByTimeAsync(1200));
     expect(google.getRoutes).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId('route-card-drive')).not.toBeInTheDocument();
@@ -829,7 +829,7 @@ describe('optional Google provider safeguards', () => {
     expect(
       screen.getByText('You are offline. Manual calculation remains available.'),
     ).toBeVisible();
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('15.58');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('18.62');
     expect(screen.getByLabelText('Fuel price (NZ$/L)', { exact: true })).toHaveValue(5);
     fireEvent.change(screen.getByLabelText('Destination', { exact: true }), {
       target: { value: 'Entered offline' },
@@ -851,7 +851,7 @@ describe('optional Google provider safeguards', () => {
     expect(google.initializeMap).not.toHaveBeenCalled();
     expect(google.attachAutocomplete).not.toHaveBeenCalled();
     expect(google.getRoutes).not.toHaveBeenCalled();
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
     fireEvent.change(screen.getByLabelText('Destination', { exact: true }), {
       target: { value: 'Manual offline destination' },
     });
@@ -865,19 +865,19 @@ describe('optional Google provider safeguards', () => {
     useOneWay();
     planRoute();
     await waitFor(() =>
-      expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('2.87'),
+      expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('3.67'),
     );
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     fireEvent(window, new Event('offline'));
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('6.97');
     changeNumber('Parking per commute (NZ$)', '4');
     changeNumber('Outbound tolls (NZ$)', '2');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('11.45');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('12.97');
     vi.useFakeTimers();
     vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(true);
     fireEvent(window, new Event('online'));
     await act(async () => vi.advanceTimersByTimeAsync(1200));
-    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('8.87');
+    expect(screen.getByTestId('cost-google-drive-test')).toHaveTextContent('9.67');
     expect(google.initializeMap).toHaveBeenCalledTimes(1);
     expect(google.getRoutes).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId('route-card-drive')).not.toBeInTheDocument();
@@ -905,12 +905,12 @@ describe('optional Google provider safeguards', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Google Maps could not complete this request',
     );
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('6.97');
     await act(async () => finish(liveResponse('google-after-auth-failure')));
     vi.useFakeTimers();
     await act(async () => vi.advanceTimersByTimeAsync(1200));
     expect(screen.queryByTestId('route-card-google-after-auth-failure')).not.toBeInTheDocument();
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('5.45');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('6.97');
     expect(screen.getByRole('alert')).toHaveTextContent(
       'Google Maps could not complete this request',
     );
@@ -1378,7 +1378,7 @@ describe('component host updates', () => {
     );
     expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue('Panmure');
     expect(screen.getByLabelText('Starting point', { exact: true })).toHaveValue('New home');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('19.00');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('22.04');
   });
 
   it('discards an in-flight Google result when the destination changes', async () => {
@@ -1533,7 +1533,7 @@ describe('result meaning and input feedback', () => {
       screen
         .getAllByTestId(/^route-card-/)
         .map((card) => card.dataset.testid?.replace('route-card-', ''));
-    expect(order()).toEqual(['drive', 'transit', 'hybrid']);
+    expect(order()).toEqual(['transit', 'drive', 'hybrid']);
     fireEvent.click(screen.getByRole('button', { name: 'Time' }));
     expect(order()).toEqual(['drive', 'transit', 'hybrid']);
     fireEvent.click(screen.getByRole('button', { name: 'Cost' }));
@@ -1616,5 +1616,21 @@ describe('destination opening hours', () => {
       await screen.findByText('Closed when you arrive (20:00) · opens Tue 09:00'),
     ).toBeVisible();
     expect(google.getPlaceHours).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('traffic delay cost', () => {
+  it('shows the delay and the fuel it costs on a live driving route', async () => {
+    const response = liveResponse('google-traffic');
+    Object.assign(response.routes[0]!.outbound[0]!, { congestionMinutes: 15 });
+    google.getRoutes.mockResolvedValueOnce(response);
+    await renderGooglePlanner();
+    useOneWay();
+    planRoute();
+    const card = await screen.findByTestId('route-card-google-traffic');
+    // 15 min at 0.8 L/hour and NZ$3.50/L is NZ$0.70.
+    expect(card).toHaveTextContent('About 15 min in traffic · $0.70 extra fuel');
+    // 10 km fuel 2.87 + upkeep 0.80 + traffic 0.70.
+    expect(screen.getByTestId('cost-google-traffic')).toHaveTextContent('4.37');
   });
 });

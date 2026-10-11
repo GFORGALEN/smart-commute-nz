@@ -10,7 +10,8 @@ import {
   type TransitFareRange,
 } from './index';
 
-const settings: CommuteSettings = { ...DEFAULT_SETTINGS };
+// Fuel-formula tests isolate upkeep; the default upkeep has its own test below.
+const settings: CommuteSettings = { ...DEFAULT_SETTINGS, maintenancePerKm: 0 };
 
 function driveOption(overrides: Partial<JourneyOption> = {}): JourneyOption {
   return {
@@ -169,6 +170,50 @@ describe('independent journey calculation', () => {
     expect(result.breakdown.inbound.totalCost).toBe(0);
     expect(result.totalMinutes).toBe(35);
     expect(result.distanceKm).toBe(19);
+  });
+
+  it('applies the IRD-derived upkeep default to driving kilometres', () => {
+    const option = createExampleOptions().find((item) => item.id === 'drive')!;
+    const result = calculateOption(option, DEFAULT_SETTINGS);
+    expect(DEFAULT_SETTINGS.maintenancePerKm).toBe(0.08);
+    expect(result.maintenanceCost).toBeCloseTo(38 * 0.08, 10);
+    expect(result.totalCost).toBeCloseTo(10.906 + 3.04, 10);
+  });
+
+  it('adds fuel lost in traffic delay separately from distance-based fuel', () => {
+    const option = driveOption({
+      outbound: [
+        {
+          mode: 'drive',
+          distanceKm: 20,
+          durationMinutes: 45,
+          congestionMinutes: 15,
+          source: 'google',
+          estimated: true,
+        },
+      ],
+      inbound: [
+        {
+          mode: 'drive',
+          distanceKm: 20,
+          durationMinutes: 30,
+          congestionMinutes: 0,
+          source: 'google',
+          estimated: true,
+        },
+      ],
+    });
+    const result = calculateOption(option, { ...settings, congestionFuelPerHour: 0.8 });
+    expect(result.congestionMinutes).toBe(15);
+    expect(result.congestionFuelCost).toBeCloseTo(0.25 * 0.8 * 3.5, 10);
+    expect(result.fuelCost).toBeCloseTo((40 / 100) * 8.2 * 3.5, 10);
+    expect(result.totalCost).toBeCloseTo(result.fuelCost + result.congestionFuelCost, 10);
+    expect(
+      calculateOption(option, { ...settings, congestionFuelPerHour: undefined }).congestionFuelCost,
+    ).toBe(0);
+    expect(() => calculateOption(option, { ...settings, congestionFuelPerHour: -1 })).toThrow(
+      RangeError,
+    );
   });
 
   it('includes an optional maintenance allowance for driving kilometres only', () => {

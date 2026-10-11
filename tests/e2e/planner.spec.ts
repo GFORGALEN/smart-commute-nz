@@ -26,8 +26,8 @@ test('no API key: all three editable manual routes compare with disclosed assump
   page,
 }) => {
   await openPlanner(page);
-  await expect(page.getByTestId('route-card-drive')).toContainText('10.91');
-  await expect(page.getByTestId('route-card-hybrid')).toContainText('18.41');
+  await expect(page.getByTestId('route-card-drive')).toContainText('13.95');
+  await expect(page.getByTestId('route-card-hybrid')).toContainText('20.81');
   await expect(page.getByTestId('route-card-transit')).toContainText('13.00');
   await expect(page.getByText('Offline example', { exact: true })).toBeVisible();
   await expect(
@@ -48,10 +48,10 @@ test('editing fuel price changes costs and recommendation, then persists across 
   await navigate(page, 'Settings');
   await page.getByLabel('Fuel price (NZ$/L)', { exact: true }).fill('5');
   await navigate(page, 'Planner');
-  await expect(page.getByTestId('route-card-drive')).toContainText('15.58');
+  await expect(page.getByTestId('route-card-drive')).toContainText('18.62');
   await expect(page.getByTestId('route-card-transit')).toContainText('Lowest cost');
   await page.reload();
-  await expect(page.getByTestId('route-card-drive')).toContainText('15.58');
+  await expect(page.getByTestId('route-card-drive')).toContainText('18.62');
   await navigate(page, 'Settings');
   await expect(page.getByLabel('Fuel price (NZ$/L)', { exact: true })).toHaveValue('5');
 });
@@ -119,12 +119,12 @@ test('outbound and return use different distances and parking is charged once', 
   await editor.getByLabel('Outbound distance (km)', { exact: true }).fill('10');
   await editor.getByLabel('Return distance (km)', { exact: true }).fill('30');
   await editor.getByLabel('Parking per commute (NZ$)', { exact: true }).fill('12');
-  await expect(page.getByTestId('route-card-drive')).toContainText('23.48');
+  await expect(page.getByTestId('route-card-drive')).toContainText('26.68');
   await page.getByLabel('Include the return journey', { exact: true }).uncheck();
-  await expect(page.getByTestId('route-card-drive')).toContainText('14.87');
+  await expect(page.getByTestId('route-card-drive')).toContainText('15.67');
   await expect(page.getByText('one way', { exact: true })).toBeVisible();
   await page.getByLabel('Include the return journey', { exact: true }).check();
-  await expect(page.getByTestId('route-card-drive')).toContainText('23.48');
+  await expect(page.getByTestId('route-card-drive')).toContainText('26.68');
 });
 
 test('a waypoint is saved as a manual preference without fabricating a new distance', async ({
@@ -144,7 +144,7 @@ test('a waypoint is saved as a manual preference without fabricating a new dista
       { exact: true },
     ),
   ).toBeVisible();
-  await expect(page.getByTestId('route-card-drive')).toContainText('10.91');
+  await expect(page.getByTestId('route-card-drive')).toContainText('13.95');
   await page.reload();
   await showInputs(page);
   await showRouteDetails(page, 'route-editor-drive');
@@ -160,7 +160,7 @@ test('edited locations and saved-place actions survive reload', async ({ page })
   await page.getByRole('button', { name: 'Save starting point', exact: true }).click();
   await page.getByLabel('Destination', { exact: true }).fill(destination);
   await page.getByRole('button', { name: 'Save destination', exact: true }).click();
-  await expect(page.getByTestId('route-card-drive')).toContainText('10.91');
+  await expect(page.getByTestId('route-card-drive')).toContainText('13.95');
   await page.reload();
   await showInputs(page);
   await expect(page.getByLabel('Starting point', { exact: true })).toHaveValue(origin);
@@ -202,7 +202,7 @@ test('the loaded app still recalculates without a network connection', async ({
   await navigate(page, 'Settings');
   await page.getByLabel('Fuel price (NZ$/L)', { exact: true }).fill('4');
   await navigate(page, 'Planner');
-  await expect(page.getByTestId('route-card-drive')).toContainText('12.46');
+  await expect(page.getByTestId('route-card-drive')).toContainText('15.50');
   await context.setOffline(false);
 });
 
@@ -241,14 +241,14 @@ test('production build reloads from its service-worker cache while offline', asy
   });
   await context.setOffline(true);
   await page.reload();
-  await expect(page.getByTestId('route-card-drive')).toContainText('10.91');
+  await expect(page.getByTestId('route-card-drive')).toContainText('13.95');
   await navigate(page, 'Settings');
   await page.getByLabel('Fuel price (NZ$/L)', { exact: true }).fill('4');
   await navigate(page, 'Planner');
-  await expect(page.getByTestId('route-card-drive')).toContainText('12.46');
+  await expect(page.getByTestId('route-card-drive')).toContainText('15.50');
   await page.goto('privacy.html');
   await expect(page.getByRole('heading', { name: 'Privacy', exact: true })).toBeVisible();
   await page.goto('./');
-  await expect(page.getByTestId('route-card-drive')).toContainText('12.46');
+  await expect(page.getByTestId('route-card-drive')).toContainText('15.50');
   await context.setOffline(false);
 });

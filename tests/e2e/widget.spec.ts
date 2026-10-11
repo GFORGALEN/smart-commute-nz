@@ -19,11 +19,11 @@ test('standalone widget mounts without a host framework and recalculates', async
     widget.mountSmartCommutePlanner(host, { destination: 'Panmure station', fuelPrice: 3.5 });
   });
   const widget = page.locator('#independent-widget');
-  await expect(widget.getByTestId('route-card-drive')).toContainText('10.91');
+  await expect(widget.getByTestId('route-card-drive')).toContainText('13.95');
   const toggle = widget.getByRole('button', { name: 'Edit journey inputs', exact: true });
   if (await toggle.isVisible()) await toggle.click();
   await expect(widget.getByLabel('Destination', { exact: true })).toHaveValue('Panmure station');
   await widget.getByLabel('Fuel price (NZ$/L)', { exact: true }).fill('5');
-  await expect(widget.getByTestId('route-card-drive')).toContainText('15.58');
+  await expect(widget.getByTestId('route-card-drive')).toContainText('18.62');
   await expect(widget.getByTestId('route-card-transit')).toContainText('Lowest cost');
 });

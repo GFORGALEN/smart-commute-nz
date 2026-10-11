@@ -220,7 +220,13 @@ const en = {
   valueOfTime: 'Time value (NZ$/hour)',
   maintenancePerKm: 'Vehicle upkeep (NZ$/km)',
   timeValueExplanation: 'A personal decision aid, not a payment. Set zero to compare only money.',
-  upkeepExplanation: 'Optional wear, depreciation and maintenance. Default: zero.',
+  upkeepExplanation:
+    'Tyres, servicing and repairs per km. The NZ$0.08 default is the IRD 2025-26 Tier 2 petrol running cost (NZ$0.37/km, checked 11 Oct 2026) minus the example fuel cost. Set zero to compare fuel only.',
+  congestionFuelPerHour: 'Extra fuel in traffic (L/hour)',
+  congestionExplanation:
+    'Google compares live traffic with free-flow time; each hour of delay adds this much fuel. About 0.8 L/hour suits a petrol car; use less for hybrids and electric cars.',
+  congestionFuel: 'Fuel lost in traffic',
+  congestionLine: 'About {minutes} min in traffic · {cost} extra fuel',
   storageNote:
     'Manual preferences and saved places remain on this device. Google route data is never saved.',
   reset: 'Reset to the offline example',
@@ -235,7 +241,7 @@ const en = {
   howItWorks: 'How the numbers work',
   formula: 'Fuel cost = distance × consumption ÷ 100 × fuel price',
   formulaExplanation:
-    'Each direction and each driving segment is calculated independently. Parking is charged once per commute. Public transport fares are entered by you.',
+    'Each direction and each driving segment is calculated independently. Driving also adds vehicle upkeep per km and, with live traffic, fuel lost in delays. Parking is charged once per commute. Public transport fares are entered by you.',
   dataSources: 'Data sources & freshness',
   exampleSource: 'Offline sample',
   exampleSourceDescription:
@@ -614,7 +620,13 @@ const zh: Record<keyof typeof en, string> = {
   valueOfTime: '时间价值 (NZ$/小时)',
   maintenancePerKm: '车辆损耗与保养 (NZ$/km)',
   timeValueExplanation: '个人决策参考值，不是实际付款。设为零时仅比较费用。',
-  upkeepExplanation: '可选的损耗、折旧与保养费用，默认为零。',
+  upkeepExplanation:
+    '每公里的轮胎、保养与维修费用。默认 NZ$0.08 取自 IRD 2025-26 年度汽油车 Tier 2 使用成本（NZ$0.37/km，2026 年 10 月 11 日核实）减去示例油费。设为零则只比较油费。',
+  congestionFuelPerHour: '堵车时额外油耗 (L/小时)',
+  congestionExplanation:
+    'Google 会比较实时路况与畅通时的耗时，每堵 1 小时按此额外耗油。汽油车约 0.8 L/小时，混动车和电动车可调低。',
+  congestionFuel: '堵车额外油费',
+  congestionLine: '堵车约多 {minutes} 分钟 · 多耗油 {cost}',
   storageNote: '手动偏好与常用地点保存在本设备。Google 路线数据不会被保存。',
   reset: '恢复离线示例',
   resetDone: '已恢复离线示例。',
@@ -627,7 +639,8 @@ const zh: Record<keyof typeof en, string> = {
     'Smart Commute NZ 是开源的奥克兰通勤费用计算器，使用确定性公式，不调用任何 AI API。',
   howItWorks: '计算方式',
   formula: '燃油费用 = 距离 × 油耗 ÷ 100 × 油价',
-  formulaExplanation: '每个方向和驾车路段分别计算。每次通勤收取一次停车费。公共交通票价由你输入。',
+  formulaExplanation:
+    '每个方向和驾车路段分别计算。驾车还会按公里计入车辆损耗，有实时路况时再加上堵车额外油费。每次通勤收取一次停车费。公共交通票价由你输入。',
   dataSources: '数据来源与时效',
   exampleSource: '离线示例数据',
   exampleSourceDescription:

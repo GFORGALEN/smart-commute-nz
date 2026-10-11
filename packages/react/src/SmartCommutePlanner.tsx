@@ -203,6 +203,9 @@ function initialState(props: SmartCommutePlannerProps): PlannerState {
       destination: toLocation(props.destination),
       settings: {
         ...saved.settings,
+        // Settings saved before congestion pricing get the default rather than none.
+        congestionFuelPerHour:
+          saved.settings.congestionFuelPerHour ?? DEFAULT_SETTINGS.congestionFuelPerHour,
         fuelPrice: props.fuelPrice ?? saved.settings.fuelPrice,
         fuelConsumption: props.fuelConsumption ?? saved.settings.fuelConsumption,
       },
@@ -2893,6 +2896,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                           t('transferCount', { count: result.transfers }),
                         ].join(' · ')}
                       </span>
+                      {result.congestionMinutes >= 1 && (
+                        <span className="sc-result-congestion">
+                          {t('congestionLine', {
+                            minutes: Math.round(result.congestionMinutes),
+                            cost: money(result.congestionFuelCost),
+                          })}
+                        </span>
+                      )}
                       {lines.length > 0 && departureStop && arrivalStop && (
                         <span className="sc-result-stops">
                           {departureStop} → {arrivalStop}
@@ -3092,6 +3103,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     const pieces: { key: MessageKey; value: number; range?: CostRange; color: string }[] = selected
       ? [
           { key: 'fuel', value: selected.fuelCost, color: '#2b8b5f' },
+          { key: 'congestionFuel', value: selected.congestionFuelCost, color: '#735824' },
           {
             key: 'fares',
             value: selected.fareCost,
@@ -3296,6 +3308,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             step="0.01"
           />
           <p className="sc-help">{t('upkeepExplanation')}</p>
+          <NumberField
+            label={t('congestionFuelPerHour')}
+            value={state.settings.congestionFuelPerHour ?? 0}
+            onChange={(congestionFuelPerHour) => updateSettings({ congestionFuelPerHour })}
+            t={t}
+          />
+          <p className="sc-help">{t('congestionExplanation')}</p>
         </div>
         <div className="sc-surface">
           <h2>{t('commutingPattern')}</h2>

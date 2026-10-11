@@ -17,7 +17,13 @@ export const DEFAULT_SETTINGS: Readonly<CommuteSettings> = Object.freeze({
   daysPerWeek: 5,
   weeksPerMonth: 4.33,
   roundTrip: true,
-  maintenancePerKm: 0,
+  /**
+   * Wear, tyres and servicing per km. IRD 2025-26 Tier 2 petrol running cost (NZ$0.37/km,
+   * verified 2026-10-11) minus the example fuel cost (8.2 L/100 km at NZ$3.50/L ≈ NZ$0.29/km).
+   */
+  maintenancePerKm: 0.08,
+  /** Typical petrol idle and creep consumption in stop-go traffic; editable per vehicle. */
+  congestionFuelPerHour: 0.8,
 });
 
 const travelModes = new Set(['drive', 'bus', 'train', 'walk', 'wait', 'parking']);
@@ -75,7 +81,14 @@ function validateLeg(leg: TravelLeg, field: string): void {
     throw new TypeError(`${field}.estimated must be a boolean.`);
   }
   nonNegative(leg.durationMinutes, `${field}.durationMinutes`);
-  for (const key of ['distanceKm', 'fuelConsumption', 'fare', 'toll', 'transfers'] as const) {
+  for (const key of [
+    'distanceKm',
+    'fuelConsumption',
+    'fare',
+    'toll',
+    'transfers',
+    'congestionMinutes',
+  ] as const) {
     const value = leg[key];
     if (value !== undefined) nonNegative(value, `${field}.${key}`);
   }
@@ -125,6 +138,8 @@ function validateSettings(settings: CommuteSettings): void {
   ] as const) {
     nonNegative(settings[key], `settings.${key}`);
   }
+  if (settings.congestionFuelPerHour !== undefined)
+    nonNegative(settings.congestionFuelPerHour, 'settings.congestionFuelPerHour');
   if (settings.daysPerWeek > 7) throw new RangeError('settings.daysPerWeek must be at most seven.');
   if (typeof settings.roundTrip !== 'boolean') {
     throw new TypeError('settings.roundTrip must be a boolean.');
@@ -170,6 +185,8 @@ export function calculateFuelCost(
 function zeroTotals(): LegTotals {
   return {
     fuelCost: 0,
+    congestionFuelCost: 0,
+    congestionMinutes: 0,
     fareCost: 0,
     tollCost: 0,
     maintenanceCost: 0,
@@ -203,6 +220,11 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
         settings.fuelPrice,
       );
       result.maintenanceCost += distanceKm * settings.maintenancePerKm;
+      // Delay in traffic burns fuel beyond the distance-based estimate.
+      const delay = leg.congestionMinutes ?? 0;
+      result.congestionMinutes += delay;
+      result.congestionFuelCost +=
+        (delay / 60) * (settings.congestionFuelPerHour ?? 0) * settings.fuelPrice;
     }
     result.fareCost += leg.fare ?? leg.fareRange?.max ?? 0;
     minimumFareCost += leg.fare ?? leg.fareRange?.min ?? 0;
@@ -212,11 +234,21 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
     result.distanceKm += distanceKm;
     result.transfers += leg.transfers ?? 0;
   }
-  result.totalCost = result.fuelCost + result.fareCost + result.tollCost + result.maintenanceCost;
+  result.totalCost =
+    result.fuelCost +
+    result.congestionFuelCost +
+    result.fareCost +
+    result.tollCost +
+    result.maintenanceCost;
   if (hasFareRange) {
     result.fareCostRange = { min: minimumFareCost, max: result.fareCost };
     result.totalCostRange = {
-      min: result.fuelCost + minimumFareCost + result.tollCost + result.maintenanceCost,
+      min:
+        result.fuelCost +
+        result.congestionFuelCost +
+        minimumFareCost +
+        result.tollCost +
+        result.maintenanceCost,
       max: result.totalCost,
     };
     validateCostRange(result.fareCostRange, 'calculated fareCostRange');
@@ -224,6 +256,8 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
   }
   for (const key of [
     'fuelCost',
+    'congestionFuelCost',
+    'congestionMinutes',
     'fareCost',
     'tollCost',
     'maintenanceCost',
@@ -246,6 +280,8 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
   const outbound = calculateLegs(option.outbound, settings);
   const inbound = settings.roundTrip ? calculateLegs(option.inbound, settings) : zeroTotals();
   const fuelCost = outbound.fuelCost + inbound.fuelCost;
+  const congestionFuelCost = outbound.congestionFuelCost + inbound.congestionFuelCost;
+  const congestionMinutes = outbound.congestionMinutes + inbound.congestionMinutes;
   const fareCost = outbound.fareCost + inbound.fareCost;
   const tollCost = outbound.tollCost + inbound.tollCost;
   const maintenanceCost = outbound.maintenanceCost + inbound.maintenanceCost;
@@ -274,6 +310,8 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
     mode: option.mode,
     totalCost,
     fuelCost,
+    congestionFuelCost,
+    congestionMinutes,
     fareCost,
     parkingCost: option.parkingCost,
     tollCost,
@@ -326,6 +364,8 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
   for (const key of [
     'totalCost',
     'fuelCost',
+    'congestionFuelCost',
+    'congestionMinutes',
     'fareCost',
     'parkingCost',
     'tollCost',

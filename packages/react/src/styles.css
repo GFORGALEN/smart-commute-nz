@@ -1218,6 +1218,11 @@ label.sc-route-measurements {
   font-size: var(--sc-fs-label);
   font-variant-numeric: tabular-nums;
 }
+.sc-result-congestion {
+  color: var(--sc-warn-text);
+  font-size: var(--sc-fs-caption);
+  font-variant-numeric: tabular-nums;
+}
 .sc-result-stops,
 .sc-result-source {
   color: var(--sc-muted);

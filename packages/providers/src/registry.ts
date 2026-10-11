@@ -170,6 +170,25 @@ export const DATA_SOURCES: readonly DataSource[] = [
       'Weather is a commute reference and does not change costs or rankings.',
     ],
   },
+  {
+    id: 'ird-kilometre-rates',
+    name: 'Inland Revenue kilometre rates (2025-26)',
+    url: 'https://www.ird.govt.nz/updates/news-folder/2026/kilometre-rates-for-the-2025-2026-income-year',
+    service: 'Published annual rates; no API',
+    fields: ['maintenancePerKm'],
+    status: 'manual',
+    verifiedOn: '2026-10-11',
+    sourceUpdatedOn: null,
+    updateFrequency: 'Annual, per income year',
+    license: 'New Zealand Government published rate; referenced, not redistributed',
+    authentication: 'None',
+    commercialUse: 'yes',
+    redistribution: 'yes',
+    limitations: [
+      'Default upkeep NZ$0.08/km = Tier 2 petrol running cost NZ$0.37/km minus example fuel.',
+      'A derived estimate for comparison, not a tax rate; users can change or zero it.',
+    ],
+  },
 ];
 
 export function sourceAgeDays(source: DataSource, now = new Date()): number {

@@ -32,6 +32,8 @@ export interface GoogleRouteData {
   description?: string;
   distanceMeters?: number;
   durationMillis?: number;
+  /** Free-flow duration without live traffic; driving only. */
+  staticDurationMillis?: number;
   legs?: { steps?: GoogleRouteStep[] }[];
   warnings?: string[];
   travelAdvisory?: { transitFare?: { currencyCode?: string; units?: number; nanos?: number } };
@@ -1076,16 +1078,21 @@ export class GoogleRouteProvider implements RouteProvider {
         'Google did not return a usable route distance and duration. Enter measurements manually.',
       );
     }
-    if (mode === 'drive')
+    if (mode === 'drive') {
+      const delay = nonnegative(route.staticDurationMillis)
+        ? Math.max(0, route.durationMillis - route.staticDurationMillis) / 60000
+        : undefined;
       return [
         {
           mode: 'drive',
           distanceKm: route.distanceMeters / 1000,
           durationMinutes: route.durationMillis / 60000,
+          ...(delay !== undefined ? { congestionMinutes: delay } : {}),
           source: 'google',
           estimated: true,
         },
       ];
+    }
     const steps = route.legs?.flatMap((leg) => leg.steps ?? []) ?? [];
     if (!steps.length)
       throw new RouteProviderError('INCOMPLETE_RESULT', 'Google did not return transit steps.');
@@ -1223,9 +1230,11 @@ export class GoogleRouteProvider implements RouteProvider {
         language: 'en',
         region: 'NZ',
       };
-      if (request.mode === 'drive')
+      if (request.mode === 'drive') {
         base.routingPreference = this.options.trafficAware ? 'TRAFFIC_AWARE' : 'TRAFFIC_UNAWARE';
-      else {
+        // Free-flow time is in the same SKU; the difference is the traffic delay.
+        if (this.options.trafficAware) base.fields.push('staticDurationMillis');
+      } else {
         // The JavaScript Route SDK accepts Route property names here. Its field
         // validation rejects the REST-style nested travelAdvisory.transitFare mask.
         base.fields.push('travelAdvisory');

@@ -84,7 +84,7 @@ describe('weather loading', () => {
   it('shows weather as unavailable when the request fails while planning keeps working', async () => {
     render(<SmartCommutePlanner {...props} />);
     await waitFor(() => expect(weatherBar()).toHaveTextContent('Weather unavailable'));
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('10.91');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
   });
 
   it('ignores a slow response for a previous origin', async () => {

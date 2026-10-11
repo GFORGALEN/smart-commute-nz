@@ -931,6 +931,23 @@ describe('Google adapter without external paid requests', () => {
     expect(second.setMap).toHaveBeenLastCalledWith(null);
     provider.dispose();
   });
+  it('records traffic delay from free-flow time on traffic-aware driving legs', async () => {
+    const { provider, computeRoutes } = mockGoogle(
+      [[{ ...drive(19000, 45 * 60000), staticDurationMillis: 30 * 60000 }]],
+      { trafficAware: true },
+    );
+    const result = await provider.getRoutes(request);
+    expect(computeRoutes.mock.calls[0]?.[0].fields).toContain('staticDurationMillis');
+    expect(result.routes[0]!.outbound[0]).toMatchObject({
+      durationMinutes: 45,
+      congestionMinutes: 15,
+    });
+    const plain = mockGoogle([[drive(19000, 45 * 60000)]]);
+    const untimed = await plain.provider.getRoutes(request);
+    expect(plain.computeRoutes.mock.calls[0]?.[0].fields).not.toContain('staticDurationMillis');
+    expect(untimed.routes[0]!.outbound[0]!.congestionMinutes).toBeUndefined();
+  });
+
   it('redraws walking steps as palette dots without a casing underneath', async () => {
     const walking = () => ({
       setMap: vi.fn(),

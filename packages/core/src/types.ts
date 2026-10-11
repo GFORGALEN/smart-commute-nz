@@ -46,6 +46,8 @@ export interface TravelLeg {
   toll?: number;
   /** Additional changes of vehicle on this leg, supplied by the route provider. */
   transfers?: number;
+  /** Traffic delay against free-flow time, in minutes, from a traffic-aware route provider. */
+  congestionMinutes?: number;
   source: DataSource;
   estimated: boolean;
 }
@@ -72,10 +74,15 @@ export interface CommuteSettings {
   roundTrip: boolean;
   /** Optional vehicle running allowance, applied only to driving distance. */
   maintenancePerKm: number;
+  /** Extra fuel burnt per hour of traffic delay, in litres. Missing means no congestion cost. */
+  congestionFuelPerHour?: number;
 }
 
 export interface LegTotals {
   fuelCost: number;
+  /** Extra fuel for traffic delay, separate from distance-based fuel. */
+  congestionFuelCost: number;
+  congestionMinutes: number;
   fareCost: number;
   fareCostRange?: CostRange;
   tollCost: number;
@@ -98,6 +105,8 @@ export interface RouteResult {
   totalCost: number;
   totalCostRange?: CostRange;
   fuelCost: number;
+  congestionFuelCost: number;
+  congestionMinutes: number;
   fareCost: number;
   fareCostRange?: CostRange;
   parkingCost: number;
