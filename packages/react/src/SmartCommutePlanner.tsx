@@ -1,33 +1,28 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowDownUp,
   ArrowDown,
   ArrowRight,
   ArrowUp,
   Bookmark,
+  Bus,
   Car,
   Check,
   ChevronDown,
   ChevronRight,
   Clock3,
-  Compass,
-  Fuel,
   House,
   Info,
   Layers3,
-  Leaf,
   LocateFixed,
   MapPin,
   Moon,
   Plus,
   RotateCcw,
   Route,
-  Settings2,
-  ShieldCheck,
   Sun,
   TrainFront,
   Trash2,
-  Wallet,
   WifiOff,
   X,
 } from 'lucide-react';
@@ -35,6 +30,7 @@ import {
   compareOptions,
   createExampleOptions,
   DEFAULT_SETTINGS,
+  EXAMPLE_INTERCHANGE_LABEL,
   type CommuteSettings,
   type CostRange,
   type JourneyOption,
@@ -47,10 +43,16 @@ import {
   GoogleRouteProvider,
   RouteProviderError,
   DATA_SOURCES,
+  openingStatus,
+  type PlaceHours,
+  type RouteErrorCode,
   type RouteResult as ProviderRouteResult,
+  type WeatherForecast,
 } from '@smart-commute/providers';
 import { createTranslator, formatMoney, type Locale, type MessageKey } from '@smart-commute/i18n';
 import { ATFareHelper } from './ATFareHelper';
+import { WeatherBar } from './WeatherBar';
+import { useWeather } from './useWeather';
 
 export interface SmartCommutePlannerProps {
   destination: Location | string;
@@ -62,6 +64,8 @@ export interface SmartCommutePlannerProps {
   onRouteSelected?: (result: RouteResult) => void;
   /** Optional restricted browser key. Online planners load the map and address search on mount. */
   googleApiKey?: string;
+  /** Demo or test weather; shown with a demo label and never fetched. */
+  weatherFixture?: WeatherForecast;
 }
 
 type Screen = 'planner' | 'comparison' | 'breakdown' | 'settings' | 'about';
@@ -94,6 +98,27 @@ const warningKeys = {
   'missing-return': 'returnWarning',
   'fare-range-estimate': 'fareRangeHelp',
 } as const;
+const googleErrorKeys: Record<RouteErrorCode, MessageKey> = {
+  MISSING_KEY: 'googleErrorMissingKey',
+  INVALID_INPUT: 'googleErrorInvalidInput',
+  UNSUPPORTED: 'googleErrorUnsupported',
+  QUOTA_EXCEEDED: 'googleErrorQuota',
+  REQUEST_DENIED: 'googleErrorDenied',
+  NETWORK_ERROR: 'googleErrorNetwork',
+  NO_ROUTES: 'googleErrorNoRoutes',
+  INCOMPLETE_RESULT: 'googleErrorIncomplete',
+  BUSY: 'googleErrorBusy',
+};
+/** Leg types that cover ground; waiting and parking have no distance to report. */
+const distanceModes: ReadonlySet<TravelLeg['mode']> = new Set(['drive', 'bus', 'train', 'walk']);
+const minorModes: ReadonlySet<TravelLeg['mode']> = new Set(['walk', 'wait', 'parking']);
+/** Fixed notes written by the Google provider, matched by their opening words. */
+const providerNoteKeys: [string, MessageKey][] = [
+  ['Route durations are estimates.', 'providerNoteEstimates'],
+  ['This request uses traffic-unaware driving', 'providerNoteTrafficUnaware'],
+  ['Outbound alternatives are paired', 'providerNotePairedReturn'],
+  ['Google used fallback routing', 'providerNoteFallback'],
+];
 const toLocation = (value: Location | string): Location =>
   typeof value === 'string' ? { label: value } : value;
 const cloneOption = (option: JourneyOption): JourneyOption => ({
@@ -261,22 +286,34 @@ function TextField({
   value,
   onChange,
   placeholder,
+  error,
+  type = 'text',
 }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  error?: string;
+  type?: 'text' | 'datetime-local';
 }) {
   const id = useId();
   return (
-    <div className="sc-field">
+    <div className={`sc-field ${error ? 'sc-field-invalid' : ''}`}>
       <label htmlFor={id}>{label}</label>
       <input
         id={id}
+        type={type}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         placeholder={placeholder}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? `${id}-error` : undefined}
       />
+      {error && (
+        <small id={`${id}-error`} className="sc-error">
+          {error}
+        </small>
+      )}
     </div>
   );
 }
@@ -308,8 +345,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const stopoverDraftRef = useRef(stopoverDraft);
   stopoverDraftRef.current = stopoverDraft;
   const [mapStopoverPicking, setMapStopoverPicking] = useState(false);
-  const [inputsOpen, setInputsOpen] = useState(Boolean(props.googleApiKey));
+  const [mapDestinationPicking, setMapDestinationPicking] = useState(false);
+  // Bumped when a mode switch or a map-picked destination should plan without another click.
+  const [autoPlanToken, setAutoPlanToken] = useState(0);
+  const [summaryInView, setSummaryInView] = useState(true);
+  const summaryRef = useRef<HTMLDivElement>(null);
+  const resultsRef = useRef<HTMLElement>(null);
   const [showAllRoutes, setShowAllRoutes] = useState(false);
+  const [sortBy, setSortBy] = useState<'cost' | 'time' | 'value'>('cost');
   const [manualRequested, setManualRequested] = useState(false);
   const [googleStatus, setGoogleStatus] = useState<
     'idle' | 'loading' | 'ready' | 'routes' | 'error'
@@ -467,7 +510,15 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const distinctCards: RouteResult[] = [];
   const similarCards: RouteResult[] = [];
   const seenCardDetails = new Set<string>();
-  for (const result of comparison.result?.results ?? []) {
+  // Core ranks by cost; people can reorder by time or by cost plus their time value.
+  const sortedResults = [...(comparison.result?.results ?? [])].sort((left, right) =>
+    sortBy === 'time'
+      ? left.totalMinutes - right.totalMinutes || left.totalCost - right.totalCost
+      : sortBy === 'value'
+        ? left.generalizedCost - right.generalizedCost
+        : 0,
+  );
+  for (const result of sortedResults) {
     const fingerprint = JSON.stringify([
       result.mode,
       result.totalMinutes.toFixed(1),
@@ -510,6 +561,107 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           ? 'budgetBestValue'
           : kind,
     );
+  const tripScope = t(state.settings.roundTrip ? 'returnIncluded' : 'oneWay');
+  const wholeMinutes = (minutes: number) => t('minutes', { count: Math.round(minutes) });
+  // Clock times are always shown in Auckland time, whatever the browser timezone.
+  const aucklandClock = useMemo(
+    () =>
+      new Intl.DateTimeFormat(locale === 'zh-CN' ? 'zh-CN' : 'en-NZ', {
+        timeZone: 'Pacific/Auckland',
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }),
+    [locale],
+  );
+  const aucklandDay = useMemo(
+    () => new Intl.DateTimeFormat('en-NZ', { timeZone: 'Pacific/Auckland', dateStyle: 'short' }),
+    [],
+  );
+  const includedLegs = (option: JourneyOption) => [
+    ...option.outbound,
+    ...(state.settings.roundTrip ? option.inbound : []),
+  ];
+  // Missing distances are summed as zero by the calculator; say so instead of showing 0 km.
+  const distanceText = (result: RouteResult) => {
+    const legs = includedLegs(result.option).filter((leg) => distanceModes.has(leg.mode));
+    const known = legs.filter((leg) => leg.distanceKm !== undefined).length;
+    if (!known) return t('distanceNotEntered');
+    if (known < legs.length) return t('distancePartial', { count: shortNumber(result.distanceKm) });
+    return t('km', { count: shortNumber(result.distanceKm) });
+  };
+  const placeLabel = (label: string) =>
+    label === EXAMPLE_INTERCHANGE_LABEL ? t('exampleInterchange') : label;
+  const describeGoogleError = (error: unknown) => {
+    if (import.meta.env.MODE !== 'test')
+      console.warn('[smart-commute] Google request failed', error);
+    return error instanceof RouteProviderError ? t(googleErrorKeys[error.code]) : t('googleError');
+  };
+  const googleErrorText = useRef(describeGoogleError);
+  googleErrorText.current = describeGoogleError;
+  const originMissing = !state.origin.label.trim();
+  const destinationMissing = !state.destination.label.trim();
+  const departureInvalid =
+    !state.leaveNow && (!state.departure || Number.isNaN(new Date(state.departure).getTime()));
+  const returnTimeMissing = googleMode && state.settings.roundTrip && !state.returnTime;
+  const showReturnTime = state.settings.roundTrip && (googleMode || !state.leaveNow);
+  const departureAt = state.leaveNow
+    ? currentMinute * 60000
+    : departureInvalid
+      ? undefined
+      : new Date(state.departure).getTime();
+  const returnAt =
+    state.settings.roundTrip &&
+    state.returnTime &&
+    !Number.isNaN(new Date(state.returnTime).getTime())
+      ? new Date(state.returnTime).getTime()
+      : undefined;
+  // Weather reuses the absolute departure instant, never the browser's wall-clock reading.
+  const weather = useWeather({
+    coordinates: state.origin.coordinates,
+    leaveNow: state.leaveNow,
+    departureAt: state.leaveNow ? undefined : departureAt,
+    now: currentMinute * 60000,
+    fixture: props.weatherFixture,
+  });
+  // Opening hours for a Google-selected destination; each place is requested once per session.
+  const destinationPlaceId = googleMode ? state.destination.placeId : undefined;
+  const [destinationHours, setDestinationHours] = useState<{
+    placeId: string;
+    hours?: PlaceHours;
+    failed?: boolean;
+  }>();
+  useEffect(() => {
+    if (!destinationPlaceId) return;
+    let active = true;
+    provider.getPlaceHours(destinationPlaceId).then(
+      (hours) => {
+        if (active) setDestinationHours({ placeId: destinationPlaceId, hours });
+      },
+      () => {
+        if (active) setDestinationHours({ placeId: destinationPlaceId, failed: true });
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [destinationPlaceId, provider]);
+  const clockSpan = (start: number | undefined, minutes: number) => {
+    if (start === undefined) return '';
+    const end = start + minutes * 60000;
+    const nextDay = aucklandDay.format(start) !== aucklandDay.format(end) ? ` ${t('nextDay')}` : '';
+    return t('clockSpan', {
+      depart: aucklandClock.format(start),
+      arrive: `${aucklandClock.format(end)}${nextDay}`,
+    });
+  };
+  // Restart the value highlight when the selected option's amount changes in place.
+  const summarySignature = selected
+    ? `${selected.id}|${selected.totalCost}|${selected.totalCostRange?.min ?? ''}`
+    : '';
+  const hasSelection = Boolean(selected);
+  const lastSummarySignature = useRef(summarySignature);
+  const [valueUpdates, setValueUpdates] = useState(0);
 
   useEffect(() => {
     if (props.locale) setLocale(props.locale);
@@ -664,6 +816,25 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     const timer = window.setTimeout(() => setNotice(''), 4200);
     return () => window.clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    const previous = lastSummarySignature.current;
+    lastSummarySignature.current = summarySignature;
+    if (previous && summarySignature && previous.split('|')[0] === summarySignature.split('|')[0])
+      if (previous !== summarySignature) setValueUpdates((count) => count + 1);
+  }, [summarySignature]);
+  useEffect(() => {
+    // The compact mobile summary appears only while the full summary is off screen.
+    const target = summaryRef.current;
+    if (screen !== 'planner' || !target || typeof IntersectionObserver === 'undefined') {
+      setSummaryInView(true);
+      return;
+    }
+    const observer = new IntersectionObserver(([entry]) =>
+      setSummaryInView(Boolean(entry?.isIntersecting)),
+    );
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [screen, hasSelection]);
 
   const updateSettings = (patch: Partial<CommuteSettings>) =>
     setState((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
@@ -762,8 +933,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     setSelectedId(result.id);
     if (googleMode) setEditingMode(result.option.mode);
     props.onRouteSelected?.(result);
-    if (hasGoogleProvenance(result.option)) provider.renderRoute(result.id);
-    else provider.clearMapRoutes();
+    // Google routes are redrawn by the map effect, which keeps selection and labels in sync.
+    if (!hasGoogleProvenance(result.option)) provider.clearMapRoutes();
   };
   const savePlace = (place: Location) => {
     if (!place.label.trim()) return;
@@ -854,6 +1025,33 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     stopoverPickCleanup.current = null;
     setMapStopoverPicking(false);
   };
+  const cancelMapDestinationPick = () => {
+    stopoverPickCleanup.current?.();
+    stopoverPickCleanup.current = null;
+    setMapDestinationPicking(false);
+  };
+  const beginMapDestinationPick = () => {
+    if (!googleMode || googleStatus !== 'ready') return;
+    try {
+      stopoverPickCleanup.current?.();
+      setMapStopoverPicking(false);
+      stopoverPickCleanup.current = provider.beginWaypointSelection((coordinates) => {
+        stopoverPickCleanup.current = null;
+        setMapDestinationPicking(false);
+        setState((current) => ({
+          ...current,
+          destination: {
+            label: `${t('mapDestinationLabel')} (${coordinates.lat.toFixed(5)}, ${coordinates.lng.toFixed(5)})`,
+            coordinates,
+          },
+        }));
+        setAutoPlanToken((count) => count + 1);
+      });
+      setMapDestinationPicking(true);
+    } catch (error) {
+      setGoogleError(describeGoogleError(error));
+    }
+  };
   const beginMapStopoverPick = () => {
     if (
       !googleMode ||
@@ -864,6 +1062,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       return;
     try {
       stopoverPickCleanup.current?.();
+      setMapDestinationPicking(false);
       stopoverPickCleanup.current = provider.beginWaypointSelection((coordinates) => {
         stopoverPickCleanup.current = null;
         setMapStopoverPicking(false);
@@ -871,11 +1070,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           label: `${t('mapStopoverLabel', { number: drivingStops.length + 1 })} (${coordinates.lat.toFixed(5)}, ${coordinates.lng.toFixed(5)})`,
           coordinates,
         });
-        setInputsOpen(true);
       });
       setMapStopoverPicking(true);
     } catch (error) {
-      setGoogleError(error instanceof Error ? error.message : t('googleError'));
+      setGoogleError(describeGoogleError(error));
     }
   };
   const saveRoute = (option: JourneyOption) => {
@@ -913,7 +1111,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       await provider.initializeMap(mapElementRef.current, (error) => {
         if (!mounted.current || activeProvider.current !== provider) return;
         mapReadyProvider.current = null;
-        setGoogleError(error.message);
+        setGoogleError(describeGoogleError(error));
         setGoogleStatus('error');
       });
       if (!mounted.current || activeProvider.current !== provider) {
@@ -921,11 +1119,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         return;
       }
       mapReadyProvider.current = provider;
-      provider.renderRoute(selectedId);
       setGoogleStatus('ready');
     } catch (error) {
       if (!mounted.current || activeProvider.current !== provider) return;
-      setGoogleError(error instanceof Error ? error.message : t('googleError'));
+      setGoogleError(describeGoogleError(error));
       setGoogleStatus('error');
     } finally {
       if (activeProvider.current === provider) mapLoadPending.current = false;
@@ -953,7 +1150,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       originElement.isConnected &&
       destinationElement.isConnected;
     setGoogleError('');
-    const onError = (error: Error) => setGoogleError(error.message);
+    const onError = (error: Error) => setGoogleError(describeGoogleError(error));
     try {
       const attach = async (field: 'origin' | 'destination', element: HTMLElement) => {
         const cleanup = await provider.attachAutocomplete(
@@ -993,7 +1190,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       if (!isCurrent()) return;
       autocompleteCleanup.current.forEach((cleanup) => cleanup());
       autocompleteCleanup.current = [];
-      setGoogleError(error instanceof Error ? error.message : t('googleError'));
+      setGoogleError(describeGoogleError(error));
     } finally {
       if (generation === autocompleteGeneration.current) {
         autocompletePending.current = false;
@@ -1018,6 +1215,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       setNotice(t('googleMissingReturn'));
       return;
     }
+    if (departureInvalid) return;
     setGoogleStatus('routes');
     routePending.current = true;
     const query = activeQuery.current;
@@ -1085,10 +1283,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       setGoogleRequests(provider.getMetrics().routeRequests);
       setGoogleStatus('ready');
       setNotice('');
-      if (response.routes[0]) {
-        setSelectedId(response.routes[0].id);
-        provider.renderRoute(response.routes[0].id);
-      }
+      if (response.routes[0]) setSelectedId(response.routes[0].id);
     } catch (error) {
       if (
         !mounted.current ||
@@ -1098,7 +1293,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       )
         return;
       setGoogleRequests(provider.getMetrics().routeRequests);
-      setGoogleError(error instanceof Error ? error.message : t('googleError'));
+      setGoogleError(describeGoogleError(error));
       if (
         error instanceof RouteProviderError &&
         ['NETWORK_ERROR', 'REQUEST_DENIED', 'QUOTA_EXCEEDED'].includes(error.code)
@@ -1124,6 +1319,18 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   addressSearchAction.current = enableAddressSearch;
   const routeAction = useRef(getGoogleRoutes);
   routeAction.current = getGoogleRoutes;
+  const autoPlanContext = useRef({ googleMode, googleStatus, editingMode, stops: 0 });
+  autoPlanContext.current = { googleMode, googleStatus, editingMode, stops: drivingStops.length };
+  useEffect(() => {
+    const context = autoPlanContext.current;
+    if (!autoPlanToken || !context.googleMode || context.googleStatus !== 'ready') return;
+    const mode = context.editingMode === 'transit' ? 'transit' : 'drive';
+    // Transit cannot take stops; the stop list already explains why nothing is planned.
+    if (mode === 'transit' && context.stops > 0) return;
+    const current =
+      lastRequestedQuery.current === activeQuery.current && lastRequestedMode.current === mode;
+    if (!current) void routeAction.current(mode);
+  }, [autoPlanToken]);
   useEffect(() => {
     if (googleMode && screen === 'planner' && googleStatus === 'idle') void loadMapAction.current();
   }, [googleMode, googleStatus, provider, screen]);
@@ -1140,10 +1347,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       lastRequestedQuery.current === liveQueryFingerprint
     )
       return;
-    const timeout = window.setTimeout(
-      () => void routeAction.current(lastRequestedMode.current),
-      800,
-    );
+    const timeout = window.setTimeout(() => {
+      if (lastRequestedQuery.current !== activeQuery.current)
+        void routeAction.current(lastRequestedMode.current);
+    }, 800);
     return () => window.clearTimeout(timeout);
   }, [googleMode, googleStatus, liveQueryFingerprint]);
 
@@ -1169,7 +1376,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           appendDrivingStopAction.current(location);
         },
         (error) => {
-          if (isCurrent()) setGoogleError(error.message);
+          if (isCurrent()) setGoogleError(googleErrorText.current(error));
         },
         {
           initialValue: stopoverDraftRef.current.label,
@@ -1184,7 +1391,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         else stopoverSearchControl.current = cleanup;
       })
       .catch((error: unknown) => {
-        if (isCurrent()) setGoogleError(error instanceof Error ? error.message : t('googleError'));
+        if (isCurrent()) setGoogleError(googleErrorText.current(error));
       });
     return () => {
       active = false;
@@ -1194,6 +1401,49 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   }, [stopoverSearchOpen, googleMode, screen, editingMode, addressSearchEnabled, provider, t]);
 
   const googleMapReady = googleStatus === 'ready' || googleStatus === 'routes';
+  // Every alternative is drawn with its outbound time and commute cost, like a directions map.
+  const mapLabels = googleMode
+    ? Object.fromEntries(
+        (comparison.result?.results ?? [])
+          .filter((result) => hasGoogleProvenance(result.option))
+          .map((result) => [
+            result.id,
+            [
+              wholeMinutes(result.breakdown.outbound.totalMinutes),
+              moneyWithRange(result.totalCost, result.totalCostRange),
+            ].join(' · '),
+          ]),
+      )
+    : {};
+  const mapLabelsKey = JSON.stringify(mapLabels);
+  // Name both ends on the map so the direction of travel reads without the form.
+  const shortPlace = (label: string) => label.split(',')[0]?.trim() || label;
+  const endpointLabels = JSON.stringify({
+    start: `${t('start')} · ${shortPlace(state.origin.label)}`,
+    end: `${t('finish')} · ${shortPlace(state.destination.label)}`,
+  });
+  const routeSelectAction = useRef<(id: string) => void>(() => undefined);
+  routeSelectAction.current = (id) => {
+    const result = comparison.result?.results.find((candidate) => candidate.id === id);
+    if (result) selectResult(result);
+  };
+  const selectedRouteId = selected?.id ?? '';
+  useEffect(() => {
+    if (!googleMode || !googleMapReady || !googleResponse || !selectedRouteId) return;
+    provider.renderRoute(selectedRouteId, {
+      labels: JSON.parse(mapLabelsKey) as Record<string, string>,
+      onSelect: (id) => routeSelectAction.current(id),
+      endpoints: JSON.parse(endpointLabels) as { start: string; end: string },
+    });
+  }, [
+    googleMode,
+    googleMapReady,
+    googleResponse,
+    selectedRouteId,
+    mapLabelsKey,
+    endpointLabels,
+    provider,
+  ]);
   useEffect(() => {
     if (googleMode && screen === 'planner' && googleMapReady)
       provider.renderWaypointMarkers(drivingStops);
@@ -1204,22 +1454,24 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     stopoverPickCleanup.current?.();
     stopoverPickCleanup.current = null;
     setMapStopoverPicking(false);
+    setMapDestinationPicking(false);
     return () => {
       stopoverPickCleanup.current?.();
       stopoverPickCleanup.current = null;
     };
   }, [googleMode, screen, editingMode, drivingStops.length, provider]);
   useEffect(() => {
-    if (!mapStopoverPicking) return;
+    if (!mapStopoverPicking && !mapDestinationPicking) return;
     const cancelOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       stopoverPickCleanup.current?.();
       stopoverPickCleanup.current = null;
       setMapStopoverPicking(false);
+      setMapDestinationPicking(false);
     };
     window.addEventListener('keydown', cancelOnEscape);
     return () => window.removeEventListener('keydown', cancelOnEscape);
-  }, [mapStopoverPicking]);
+  }, [mapStopoverPicking, mapDestinationPicking]);
 
   const reconnectGoogle = () => {
     setManualRequested(false);
@@ -1229,10 +1481,30 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     setGoogleStatus('idle');
   };
 
-  const renderDriveLeg = (option: JourneyOption, direction: Direction, index: number) => {
+  const includedDirections = (['outbound', 'inbound'] as const).filter(
+    (direction) => direction === 'outbound' || state.settings.roundTrip,
+  );
+  const firstLegIndex = (legs: TravelLeg[], kind: 'drive' | 'transit') =>
+    legs.findIndex((leg) =>
+      kind === 'drive' ? leg.mode === 'drive' : leg.mode === 'bus' || leg.mode === 'train',
+    );
+  const driveDistanceLabel = (option: JourneyOption, direction: Direction) =>
+    option.id === 'drive'
+      ? t(direction === 'outbound' ? 'outboundDistance' : 'inboundDistance')
+      : `${nameOf(option)} · ${t('legDistance', { direction: t(directionKeys[direction]) })}`;
+  const transitFareLabel = (option: JourneyOption, direction: Direction) =>
+    option.mode === 'transit'
+      ? t(direction === 'outbound' ? 'outboundFare' : 'inboundFare')
+      : t(direction === 'outbound' ? 'hybridOutboundFare' : 'hybridInboundFare');
+
+  const renderDriveLeg = (
+    option: JourneyOption,
+    direction: Direction,
+    index: number,
+    showDistance = true,
+  ) => {
     const leg = option[direction][index];
     const directionName = t(directionKeys[direction]);
-    const primary = option.id === 'drive';
     return (
       <div className="sc-driving-fields" key={`${direction}-${index}`}>
         <div className="sc-field-grid">
@@ -1257,16 +1529,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             </div>
           ) : (
             <>
-              <NumberField
-                label={
-                  primary
-                    ? t(direction === 'outbound' ? 'outboundDistance' : 'inboundDistance')
-                    : `${option.name} · ${t('legDistance', { direction: directionName })}`
-                }
-                value={leg.distanceKm ?? 0}
-                onChange={(distanceKm) => updateLeg(option.id, direction, index, { distanceKm })}
-                t={t}
-              />
+              {showDistance && (
+                <NumberField
+                  label={driveDistanceLabel(option, direction)}
+                  value={leg.distanceKm ?? 0}
+                  onChange={(distanceKm) => updateLeg(option.id, direction, index, { distanceKm })}
+                  t={t}
+                />
+              )}
               <NumberField
                 label={t('legDuration', { direction: directionName })}
                 value={leg.durationMinutes}
@@ -1311,7 +1581,12 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     );
   };
 
-  const renderTransitLeg = (option: JourneyOption, direction: Direction, index: number) => {
+  const renderTransitLeg = (
+    option: JourneyOption,
+    direction: Direction,
+    index: number,
+    showPrimaryFare = true,
+  ) => {
     const leg = option[direction][index];
     const live = hasGoogleProvenance(option);
     if (live && leg.mode !== 'bus' && leg.mode !== 'train')
@@ -1321,15 +1596,12 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <strong>{t('minutes', { count: shortNumber(leg.durationMinutes) })}</strong>
         </div>
       );
-    const transitIndex = option[direction].findIndex(
-      (segment) => segment.mode === 'bus' || segment.mode === 'train',
-    );
+    const transitIndex = firstLegIndex(option[direction], 'transit');
     const fareLabel =
       index === transitIndex
-        ? option.mode === 'transit'
-          ? t(direction === 'outbound' ? 'outboundFare' : 'inboundFare')
-          : t(direction === 'outbound' ? 'hybridOutboundFare' : 'hybridInboundFare')
+        ? transitFareLabel(option, direction)
         : t('segmentFare', { mode: t(legKeys[leg.mode]) });
+    const showFare = live ? index === transitIndex : showPrimaryFare || index !== transitIndex;
     return (
       <div className="sc-transit-segment" key={`${direction}-${index}`}>
         <div className="sc-segment-head">
@@ -1370,7 +1642,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 })
               }
             >
-              <X size={15} />
+              <X size={16} />
             </button>
           )}
         </div>
@@ -1397,7 +1669,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           )}
           {['bus', 'train'].includes(leg.mode) && (
             <>
-              {(!live || index === transitIndex) && (
+              {showFare && (
                 <NumberField
                   label={fareLabel}
                   value={live ? (leg.fare ?? Number.NaN) : (leg.fare ?? 0)}
@@ -1465,26 +1737,88 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     );
   };
 
-  const renderOptionEditor = (option: JourneyOption) => (
-    <div key={option.id} className="sc-option-editor" data-testid={`route-editor-${option.id}`}>
-      <div className="sc-editor-title">
-        <h3>{nameOf(option)}</h3>
-        {option.id !== 'drive' && option.mode === 'drive' && !hasGoogleProvenance(option) && (
-          <button
-            className="sc-icon-button"
-            aria-label={t('removeRoute')}
-            onClick={() =>
-              setState((current) => ({
-                ...current,
-                options: current.options.filter((route) => route.id !== option.id),
-              }))
-            }
-          >
-            <Trash2 size={15} />
-          </button>
-        )}
-      </div>
-      {!hasGoogleProvenance(option) && !['drive', 'transit', 'hybrid'].includes(option.id) && (
+  const renderDirections = (option: JourneyOption, essentialsShown: boolean) =>
+    includedDirections.map((direction) => {
+      const firstDrive = firstLegIndex(option[direction], 'drive');
+      const firstTransit = firstLegIndex(option[direction], 'transit');
+      return (
+        <details className="sc-direction" open={direction === 'outbound'} key={direction}>
+          <summary>
+            {t(directionKeys[direction])}
+            <ChevronDown size={16} />
+          </summary>
+          <div className="sc-direction-body">
+            {option[direction].map((leg, index) =>
+              leg.mode === 'drive'
+                ? renderDriveLeg(option, direction, index, !essentialsShown || index !== firstDrive)
+                : renderTransitLeg(
+                    option,
+                    direction,
+                    index,
+                    !essentialsShown || index !== firstTransit,
+                  ),
+            )}
+            {option.mode !== 'drive' && !hasGoogleProvenance(option) && (
+              <button
+                className="sc-small-button"
+                onClick={() =>
+                  updateOption(option.id, {
+                    [direction]: [
+                      ...option[direction],
+                      { mode: 'walk', durationMinutes: 5, source: 'manual', estimated: true },
+                    ],
+                  })
+                }
+              >
+                <Plus size={15} />
+                {t('addSegment')}
+              </button>
+            )}
+          </div>
+        </details>
+      );
+    });
+
+  const renderFareHelper = (option: JourneyOption) => (
+    <ATFareHelper
+      option={option}
+      locale={locale}
+      roundTrip={state.settings.roundTrip}
+      locationContext={JSON.stringify([state.origin, state.destination])}
+      departureTime={state.leaveNow ? new Date() : new Date(state.departure)}
+      returnTime={state.returnTime ? new Date(state.returnTime) : undefined}
+      onApply={(outboundFare, returnFare) => {
+        setATFareContexts((current) => ({
+          ...current,
+          [option.id]: atFareContext(option, state, currentMinute),
+        }));
+        const assign = (legs: TravelLeg[], fare: number) => {
+          const first = legs.findIndex((leg) => leg.mode === 'bus' || leg.mode === 'train');
+          return legs.map((leg, index): TravelLeg =>
+            leg.mode === 'bus' || leg.mode === 'train'
+              ? {
+                  ...leg,
+                  fare: index === first ? fare : 0,
+                  fareRange: undefined,
+                  fareSource: 'at-rule',
+                  source: hasGoogleProvenance(option) ? leg.source : 'at-rule',
+                  estimated: true,
+                }
+              : leg,
+          );
+        };
+        updateOption(option.id, {
+          outbound: assign(option.outbound, outboundFare),
+          ...(state.settings.roundTrip ? { inbound: assign(option.inbound, returnFare) } : {}),
+        });
+      }}
+    />
+  );
+
+  // The values that decide most of a manual estimate stay visible; the rest is one click away.
+  const renderEssentials = (option: JourneyOption) => (
+    <>
+      {!['drive', 'transit', 'hybrid'].includes(option.id) && (
         <TextField
           label={t('routeName')}
           value={option.name}
@@ -1492,21 +1826,73 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         />
       )}
       {option.mode === 'hybrid' && (
-        <>
-          <TextField
-            label={t('hub')}
-            value={option.waypoints[0]?.label ?? ''}
-            onChange={(label) =>
-              updateOption(option.id, {
-                waypoints: [{ label }, ...option.waypoints.slice(1)],
-                parkingVerified: false,
-              })
+        <TextField
+          label={t('hub')}
+          value={placeLabel(option.waypoints[0]?.label ?? '')}
+          onChange={(label) =>
+            updateOption(option.id, {
+              waypoints: [{ label }, ...option.waypoints.slice(1)],
+              parkingVerified: false,
+            })
+          }
+        />
+      )}
+      <div className="sc-field-grid">
+        {option.mode !== 'transit' &&
+          includedDirections.map((direction) => {
+            const index = firstLegIndex(option[direction], 'drive');
+            const leg = option[direction][index];
+            if (!leg) return null;
+            return (
+              <NumberField
+                key={`distance-${direction}`}
+                label={driveDistanceLabel(option, direction)}
+                value={leg.distanceKm ?? 0}
+                onChange={(distanceKm) => updateLeg(option.id, direction, index, { distanceKm })}
+                t={t}
+              />
+            );
+          })}
+        {option.mode !== 'drive' &&
+          includedDirections.map((direction) => {
+            const index = firstLegIndex(option[direction], 'transit');
+            const leg = option[direction][index];
+            if (!leg) return null;
+            return (
+              <NumberField
+                key={`fare-${direction}`}
+                label={transitFareLabel(option, direction)}
+                value={leg.fare ?? 0}
+                onChange={(fare) =>
+                  updateLeg(option.id, direction, index, {
+                    fare,
+                    fareRange: undefined,
+                    fareSource: 'manual',
+                  })
+                }
+                t={t}
+              />
+            );
+          })}
+        {option.mode !== 'transit' && (
+          <NumberField
+            label={t(option.mode === 'hybrid' ? 'stationParking' : 'parking')}
+            value={option.parkingCost}
+            onChange={(parkingCost) =>
+              option.id === drivingPreference?.id
+                ? updateDrivingCosts({ parkingCost })
+                : updateOption(option.id, { parkingCost, parkingVerified: false })
             }
+            t={t}
           />
-          <div className="sc-parking-alert">
+        )}
+      </div>
+      {option.mode === 'hybrid' && (
+        <>
+          <p className="sc-parking-alert">
             <Info size={16} />
             <span>{t('parkingUnknown')}</span>
-          </div>
+          </p>
           <label className="sc-checkbox">
             <input
               type="checkbox"
@@ -1519,432 +1905,528 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           </label>
         </>
       )}
-      {(['outbound', 'inbound'] as const)
-        .filter((direction) => direction === 'outbound' || state.settings.roundTrip)
-        .map((direction) => (
-          <details className="sc-direction" open={direction === 'outbound'} key={direction}>
-            <summary>
-              {t(directionKeys[direction])}
-              <ChevronDown size={15} />
-            </summary>
-            <div className="sc-direction-body">
-              {option[direction].map((leg, index) =>
-                leg.mode === 'drive'
-                  ? renderDriveLeg(option, direction, index)
-                  : renderTransitLeg(option, direction, index),
-              )}
-              {option.mode !== 'drive' && !hasGoogleProvenance(option) && (
-                <button
-                  className="sc-small-button"
-                  onClick={() =>
-                    updateOption(option.id, {
-                      [direction]: [
-                        ...option[direction],
-                        { mode: 'walk', durationMinutes: 5, source: 'manual', estimated: true },
-                      ],
-                    })
-                  }
-                >
-                  <Plus size={14} />
-                  {t('addSegment')}
-                </button>
-              )}
-            </div>
-          </details>
-        ))}
-      {option.mode !== 'transit' && (
-        <NumberField
-          label={t(option.mode === 'hybrid' ? 'stationParking' : 'parking')}
-          value={option.parkingCost}
-          onChange={(parkingCost) =>
-            hasGoogleProvenance(option) || option.id === drivingPreference?.id
-              ? updateDrivingCosts({ parkingCost })
-              : updateOption(option.id, { parkingCost, parkingVerified: false })
-          }
-          t={t}
-        />
-      )}
-      {option.mode !== 'drive' && (
-        <ATFareHelper
-          option={option}
-          locale={locale}
-          roundTrip={state.settings.roundTrip}
-          locationContext={JSON.stringify([state.origin, state.destination])}
-          departureTime={state.leaveNow ? new Date() : new Date(state.departure)}
-          returnTime={state.returnTime ? new Date(state.returnTime) : undefined}
-          onApply={(outboundFare, returnFare) => {
-            setATFareContexts((current) => ({
-              ...current,
-              [option.id]: atFareContext(option, state, currentMinute),
-            }));
-            const assign = (legs: TravelLeg[], fare: number) => {
-              const first = legs.findIndex((leg) => leg.mode === 'bus' || leg.mode === 'train');
-              return legs.map((leg, index): TravelLeg =>
-                leg.mode === 'bus' || leg.mode === 'train'
-                  ? {
-                      ...leg,
-                      fare: index === first ? fare : 0,
-                      fareRange: undefined,
-                      fareSource: 'at-rule',
-                      source: hasGoogleProvenance(option) ? leg.source : 'at-rule',
-                      estimated: true,
-                    }
-                  : leg,
-              );
-            };
-            updateOption(option.id, {
-              outbound: assign(option.outbound, outboundFare),
-              ...(state.settings.roundTrip ? { inbound: assign(option.inbound, returnFare) } : {}),
-            });
+    </>
+  );
+
+  const renderWaypoints = (option: JourneyOption) => (
+    <div className="sc-waypoints">
+      <h4>{t('waypoints')}</h4>
+      <p className="sc-help">{t('waypointNote')}</p>
+      {option.waypoints.map((place, index) => (
+        <div className="sc-waypoint-chip" key={`${index}-${place.label}`}>
+          <MapPin size={15} />
+          <span>{place.label}</span>
+          <button
+            className="sc-icon-button"
+            aria-label={`${t('removeWaypoint')} ${place.label}`}
+            onClick={() =>
+              updateOption(option.id, {
+                waypoints: option.waypoints.filter((_, placeIndex) => placeIndex !== index),
+              })
+            }
+          >
+            <X size={15} />
+          </button>
+        </div>
+      ))}
+      <div className="sc-inline-field">
+        <input
+          aria-label={t('waypoints')}
+          placeholder={t('waypointPlaceholder')}
+          value={waypointDraft}
+          onChange={(event) => setWaypointDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') addWaypoint(option);
           }}
         />
-      )}
-      {option.mode === 'drive' && !hasGoogleProvenance(option) && (
-        <div className="sc-waypoints">
-          <h4>{t('waypoints')}</h4>
-          <p>{t('waypointNote')}</p>
-          {option.waypoints.map((place, index) => (
-            <div className="sc-waypoint-chip" key={`${index}-${place.label}`}>
-              <MapPin size={14} />
-              <span>{place.label}</span>
-              <button
-                className="sc-icon-button"
-                aria-label={`${t('removeWaypoint')} ${place.label}`}
-                onClick={() =>
-                  updateOption(option.id, {
-                    waypoints: option.waypoints.filter((_, placeIndex) => placeIndex !== index),
-                  })
-                }
-              >
-                <X size={14} />
-              </button>
-            </div>
-          ))}
-          <div className="sc-inline-field">
-            <input
-              aria-label={t('waypoints')}
-              placeholder={t('waypointPlaceholder')}
-              value={waypointDraft}
-              onChange={(event) => setWaypointDraft(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') addWaypoint(option);
-              }}
-            />
-            <button
-              className="sc-icon-button sc-solid"
-              aria-label={t('addWaypoint')}
-              disabled={!waypointDraft.trim()}
-              onClick={() => addWaypoint(option)}
-            >
-              <Plus size={17} />
-            </button>
-          </div>
-        </div>
-      )}
-      {!hasGoogleProvenance(option) && (
         <button
-          className="sc-text-button"
-          disabled={comparison.error}
-          onClick={() => saveRoute(option)}
+          className="sc-icon-button sc-solid"
+          aria-label={t('addWaypoint')}
+          disabled={!waypointDraft.trim()}
+          onClick={() => addWaypoint(option)}
         >
-          <Bookmark size={14} />
-          {t('saveRoute')}
+          <Plus size={17} />
         </button>
-      )}
+      </div>
     </div>
   );
 
-  const renderInputs = () => (
-    <aside className={`sc-input-panel ${inputsOpen ? 'sc-inputs-open' : ''}`}>
-      <button
-        className="sc-mobile-input-toggle"
-        onClick={() => setInputsOpen(!inputsOpen)}
-        aria-expanded={inputsOpen}
-        aria-controls={`${plannerId}-inputs`}
-      >
-        <Settings2 size={18} />
-        {t(inputsOpen ? 'yourJourney' : 'editInputs')}
-        <ChevronDown size={17} />
-      </button>
-      <div className="sc-input-content" id={`${plannerId}-inputs`}>
-        <div className="sc-panel-heading">
-          <span className="sc-icon-tile">
-            <Route size={18} />
-          </span>
-          <div>
-            <h2>{t('yourJourney')}</h2>
-            <span>{t('region')}</span>
-          </div>
-        </div>
-        <div className="sc-location-fields">
-          <div className="sc-location-row">
-            <span className="sc-route-dot" />
-            {googleMode ? (
-              <div className="sc-field sc-live-address">
-                <span>{t('origin')}</span>
-                <div ref={originSearchRef} />
-                {!addressSearchEnabled && (
-                  <small>{addressSearchPending ? t('googleLoading') : state.origin.label}</small>
-                )}
-              </div>
-            ) : (
-              <TextField
-                label={t('origin')}
-                value={state.origin.label}
-                onChange={(label) => setState((current) => ({ ...current, origin: { label } }))}
-              />
-            )}
-            <button
-              className="sc-icon-button"
-              aria-label={t('saveOrigin')}
-              onClick={() => savePlace(state.origin)}
-            >
-              <Bookmark size={16} />
-            </button>
-          </div>
-          <div className="sc-location-row">
-            <MapPin className="sc-destination-pin" size={19} />
-            {googleMode ? (
-              <div className="sc-field sc-live-address">
-                <span>{t('destination')}</span>
-                <div ref={destinationSearchRef} />
-                {!addressSearchEnabled && (
-                  <small>
-                    {addressSearchPending ? t('googleLoading') : state.destination.label}
-                  </small>
-                )}
-              </div>
-            ) : (
-              <TextField
-                label={t('destination')}
-                value={state.destination.label}
-                onChange={(label) =>
-                  setState((current) => ({ ...current, destination: { label } }))
+  const renderOptionEditor = (option: JourneyOption, showTitle: boolean) => {
+    const live = hasGoogleProvenance(option);
+    return (
+      <div key={option.id} className="sc-option-editor" data-testid={`route-editor-${option.id}`}>
+        {(showTitle || live) && (
+          <div className="sc-editor-title">
+            <h3>{nameOf(option)}</h3>
+            {option.id !== 'drive' && option.mode === 'drive' && !live && (
+              <button
+                className="sc-icon-button"
+                aria-label={t('removeRoute')}
+                onClick={() =>
+                  setState((current) => ({
+                    ...current,
+                    options: current.options.filter((route) => route.id !== option.id),
+                  }))
                 }
+              >
+                <Trash2 size={16} />
+              </button>
+            )}
+          </div>
+        )}
+        {live ? (
+          <>
+            {renderDirections(option, false)}
+            {option.mode !== 'transit' && (
+              <NumberField
+                label={t('parking')}
+                value={option.parkingCost}
+                onChange={(parkingCost) => updateDrivingCosts({ parkingCost })}
+                t={t}
               />
             )}
+            {option.mode !== 'drive' && renderFareHelper(option)}
+          </>
+        ) : (
+          <>
+            {renderEssentials(option)}
+            {option.mode !== 'drive' && renderFareHelper(option)}
+            <details className="sc-more-details">
+              <summary>
+                {t('moreRouteDetails')}
+                <ChevronDown size={16} />
+              </summary>
+              <div className="sc-more-details-body">
+                {renderDirections(option, true)}
+                {option.mode === 'drive' && renderWaypoints(option)}
+                <button
+                  className="sc-text-button"
+                  disabled={comparison.error}
+                  onClick={() => saveRoute(option)}
+                >
+                  <Bookmark size={15} />
+                  {t('saveRoute')}
+                </button>
+              </div>
+            </details>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  const renderCarFields = () => (
+    <div className="sc-field-grid">
+      <NumberField
+        label={t('fuelPrice')}
+        value={state.settings.fuelPrice}
+        onChange={(fuelPrice) => updateSettings({ fuelPrice })}
+        t={t}
+      />
+      <NumberField
+        label={t('fuelConsumption')}
+        value={state.settings.fuelConsumption}
+        onChange={(fuelConsumption) => updateSettings({ fuelConsumption })}
+        t={t}
+      />
+    </div>
+  );
+
+  const renderSavedRoutes = () =>
+    state.savedRoutes.length > 0 && (
+      <details className="sc-saved-places">
+        <summary>
+          {t('savedRoutes')}
+          <ChevronDown size={15} />
+        </summary>
+        {state.savedRoutes.map((option) => (
+          <div className="sc-saved-place" key={option.id}>
+            <span>{nameOf(option)}</span>
             <button
               className="sc-icon-button"
-              aria-label={t('saveDestination')}
-              onClick={() => savePlace(state.destination)}
+              aria-label={`${t('loadRoute')} ${nameOf(option)}`}
+              onClick={() => {
+                if (usesATFare(option, state.settings.roundTrip))
+                  setATFareContexts((current) => {
+                    const next = { ...current };
+                    delete next[option.id];
+                    return next;
+                  });
+                setState((current) => ({
+                  ...current,
+                  options: [
+                    ...current.options.filter((route) => route.id !== option.id),
+                    cloneOption(option),
+                  ],
+                }));
+                setEditingMode(option.mode);
+              }}
             >
-              <Bookmark size={16} />
+              <RotateCcw size={15} />
+            </button>
+            <button
+              className="sc-icon-button"
+              aria-label={`${t('deleteSavedRoute')} ${nameOf(option)}`}
+              onClick={() =>
+                setState((current) => ({
+                  ...current,
+                  savedRoutes: current.savedRoutes.filter((route) => route.id !== option.id),
+                }))
+              }
+            >
+              <Trash2 size={15} />
             </button>
           </div>
-          <button
-            className="sc-swap"
-            aria-label={t('swap')}
-            onClick={() =>
-              setState((current) => ({
-                ...current,
-                origin: current.destination,
-                destination: current.origin,
-                options: current.options.map((option) =>
-                  option.mode === 'drive' && !hasGoogleProvenance(option)
-                    ? { ...option, waypoints: [...option.waypoints].reverse() }
-                    : option,
-                ),
-              }))
-            }
+        ))}
+      </details>
+    );
+
+  const renderLocationRow = (field: 'origin' | 'destination') => {
+    const missing = field === 'origin' ? originMissing : destinationMissing;
+    const error = missing ? t(field === 'origin' ? 'originRequired' : 'destinationRequired') : '';
+    const errorId = `${plannerId}-${field}-error`;
+    return (
+      <div className="sc-location-row">
+        <span
+          className={`sc-route-dot ${field === 'destination' ? 'sc-route-dot-end' : ''}`}
+          aria-hidden="true"
+        />
+        {googleMode ? (
+          <div
+            className={`sc-field sc-live-address ${missing ? 'sc-field-invalid' : ''}`}
+            aria-describedby={missing ? errorId : undefined}
           >
-            <ArrowDownUp size={15} />
-          </button>
-        </div>
-        {googleMode &&
-          drivingPreference &&
-          (editingMode === 'drive' || drivingStops.length > 0) && (
-            <section className="sc-stopovers" aria-label={t('waypoints')}>
-              <div className="sc-stopover-heading">
-                <h3>{t('waypoints')}</h3>
-                <span>{drivingStops.length}/10</span>
-              </div>
-              <p className="sc-help">{t('stopoverHelp')}</p>
-              {drivingStops.length > 0 && (
-                <ol className="sc-stopover-list">
-                  {drivingStops.map((place, index) => (
-                    <li key={`${index}-${place.label}`}>
-                      <span className="sc-stopover-number" aria-hidden="true">
-                        {index + 1}
-                      </span>
-                      <span className="sc-stopover-label">{place.label}</span>
-                      <div className="sc-stopover-controls">
+            <span>{t(field)}</span>
+            <div ref={field === 'origin' ? originSearchRef : destinationSearchRef} />
+            {!addressSearchEnabled && (
+              <small>{addressSearchPending ? t('googleLoading') : state[field].label}</small>
+            )}
+            {missing && (
+              <small id={errorId} className="sc-error">
+                {error}
+              </small>
+            )}
+          </div>
+        ) : (
+          <TextField
+            label={t(field)}
+            value={state[field].label}
+            onChange={(label) => setState((current) => ({ ...current, [field]: { label } }))}
+            error={error || undefined}
+          />
+        )}
+        <button
+          className="sc-icon-button"
+          aria-label={t(field === 'origin' ? 'saveOrigin' : 'saveDestination')}
+          onClick={() => savePlace(state[field])}
+        >
+          <Bookmark size={16} />
+        </button>
+      </div>
+    );
+  };
+
+  // Arrival = departure plus the selected Google route's outbound time.
+  const renderDestinationHours = () => {
+    if (!destinationPlaceId) return null;
+    const entry = destinationHours?.placeId === destinationPlaceId ? destinationHours : undefined;
+    const arrivalAt =
+      departureAt === undefined
+        ? undefined
+        : departureAt +
+          (selected && hasGoogleProvenance(selected.option)
+            ? selected.breakdown.outbound.totalMinutes
+            : 0) *
+            60000;
+    let tone: 'open' | 'closed' | 'neutral' = 'neutral';
+    let text = t('placeHoursLoading');
+    if (entry?.failed || (entry && !entry.hours)) text = t('placeHoursError');
+    else if (entry?.hours && arrivalAt === undefined) text = t('placeHoursNeedTime');
+    else if (entry?.hours && arrivalAt !== undefined) {
+      const offset = (entry.hours.utcOffsetMinutes ?? 0) * 60000;
+      const day = (time: number) => Math.floor((time + offset) / 86_400_000);
+      // Times are read in the place's own offset, so they match the opening hours shown.
+      const language = locale === 'zh-CN' ? 'zh-CN' : 'en-NZ';
+      const placeClock = (time: number) => {
+        const clock = new Intl.DateTimeFormat(language, {
+          timeZone: 'UTC',
+          hour: '2-digit',
+          minute: '2-digit',
+          hourCycle: 'h23',
+        }).format(time + offset);
+        if (day(time) === day(arrivalAt)) return clock;
+        // Weekday and time are joined explicitly so every language keeps a space between them.
+        const weekday = new Intl.DateTimeFormat(language, {
+          timeZone: 'UTC',
+          weekday: 'short',
+        }).format(time + offset);
+        return `${weekday} ${clock}`;
+      };
+      const status = openingStatus(entry.hours, arrivalAt);
+      const arrival = placeClock(arrivalAt);
+      if (status.state === 'open') {
+        tone = 'open';
+        text = t('placeOpenAtArrival', { arrival, closes: placeClock(status.closesAt) });
+      } else if (status.state === 'closed') {
+        tone = 'closed';
+        text = t('placeClosedAtArrival', {
+          arrival,
+          opens: status.opensAt === undefined ? '—' : placeClock(status.opensAt),
+        });
+      } else if (status.state === 'always-open') {
+        tone = 'open';
+        text = t('placeAlwaysOpen');
+      } else if (status.state === 'closed-permanently' || status.state === 'closed-temporarily') {
+        tone = 'closed';
+        text = t(
+          status.state === 'closed-permanently'
+            ? 'placeClosedPermanently'
+            : 'placeClosedTemporarily',
+        );
+      } else text = t('placeHoursUnknown');
+    }
+    return (
+      <p className="sc-place-hours" data-tone={tone}>
+        <Clock3 size={14} aria-hidden="true" />
+        <span>{text}</span>
+      </p>
+    );
+  };
+
+  const renderInputs = () => {
+    const editorOptions = visibleOptions.filter(
+      (option) =>
+        option.mode === editingMode && (!googleMode || option.id === (selected?.id ?? selectedId)),
+    );
+    return (
+      <section className="sc-input-panel" aria-labelledby={`${plannerId}-journey`}>
+        <section className="sc-input-section">
+          <h2 id={`${plannerId}-journey`} className="sc-visually-hidden">
+            {t('yourJourney')}
+          </h2>
+          <div className="sc-location-fields">
+            {renderLocationRow('origin')}
+            {googleMode &&
+              drivingPreference &&
+              (editingMode === 'drive' || drivingStops.length > 0) && (
+                <section className="sc-stopovers" aria-label={t('waypoints')}>
+                  <div className="sc-stopover-heading">
+                    <h3>{t('waypoints')}</h3>
+                    <span>{drivingStops.length}/10</span>
+                  </div>
+                  {drivingStops.length > 1 && <p className="sc-help">{t('stopoverHelp')}</p>}
+                  {drivingStops.length > 0 && (
+                    <ol className="sc-stopover-list">
+                      {drivingStops.map((place, index) => (
+                        <li key={`${index}-${place.label}`}>
+                          <span className="sc-stopover-number" aria-hidden="true">
+                            {index + 1}
+                          </span>
+                          <span className="sc-stopover-label">{place.label}</span>
+                          <div className="sc-stopover-controls">
+                            <button
+                              className="sc-icon-button"
+                              aria-label={`${t('moveStopoverUp')} ${place.label}`}
+                              disabled={index === 0}
+                              onClick={() => moveDrivingStop(index, -1)}
+                            >
+                              <ArrowUp size={15} />
+                            </button>
+                            <button
+                              className="sc-icon-button"
+                              aria-label={`${t('moveStopoverDown')} ${place.label}`}
+                              disabled={index === drivingStops.length - 1}
+                              onClick={() => moveDrivingStop(index, 1)}
+                            >
+                              <ArrowDown size={15} />
+                            </button>
+                            <button
+                              className="sc-icon-button"
+                              aria-label={`${t('removeWaypoint')} ${place.label}`}
+                              onClick={() =>
+                                updateOption(drivingPreference.id, {
+                                  waypoints: drivingStops.filter((_, item) => item !== index),
+                                })
+                              }
+                            >
+                              <X size={15} />
+                            </button>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {stopoverSearchOpen && editingMode === 'drive' ? (
+                    <div className="sc-stopover-search">
+                      <div className="sc-field sc-live-address">
+                        <span>{t('stopoverSearch')}</span>
+                        <div ref={stopoverSearchRef} />
+                      </div>
+                      <div className="sc-stopover-search-actions">
                         <button
-                          className="sc-icon-button"
-                          aria-label={`${t('moveStopoverUp')} ${place.label}`}
-                          disabled={index === 0}
-                          onClick={() => moveDrivingStop(index, -1)}
+                          className="sc-small-button"
+                          disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
+                          onClick={() => appendDrivingStop(stopoverDraft)}
                         >
-                          <ArrowUp size={14} />
+                          <Plus size={15} />
+                          {t('addStopover')}
                         </button>
                         <button
                           className="sc-icon-button"
-                          aria-label={`${t('moveStopoverDown')} ${place.label}`}
-                          disabled={index === drivingStops.length - 1}
-                          onClick={() => moveDrivingStop(index, 1)}
+                          aria-label={t('cancelStopoverSearch')}
+                          onClick={() => {
+                            setStopoverSearchOpen(false);
+                            setStopoverDraft({ label: '' });
+                          }}
                         >
-                          <ArrowDown size={14} />
-                        </button>
-                        <button
-                          className="sc-icon-button"
-                          aria-label={`${t('removeWaypoint')} ${place.label}`}
-                          onClick={() =>
-                            updateOption(drivingPreference.id, {
-                              waypoints: drivingStops.filter((_, item) => item !== index),
-                            })
-                          }
-                        >
-                          <X size={14} />
+                          <X size={16} />
                         </button>
                       </div>
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {stopoverSearchOpen && editingMode === 'drive' ? (
-                <div className="sc-stopover-search">
-                  <div className="sc-field sc-live-address">
-                    <span>{t('stopoverSearch')}</span>
-                    <div ref={stopoverSearchRef} />
-                  </div>
-                  <div className="sc-stopover-search-actions">
+                    </div>
+                  ) : (
                     <button
-                      className="sc-small-button"
-                      disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
-                      onClick={() => appendDrivingStop(stopoverDraft)}
+                      className="sc-text-button sc-stopover-add"
+                      onClick={() => {
+                        setStopoverDraft({ label: '' });
+                        setStopoverSearchOpen(true);
+                      }}
+                      disabled={
+                        editingMode !== 'drive' ||
+                        drivingStops.length >= 10 ||
+                        !addressSearchEnabled
+                      }
                     >
-                      <Plus size={15} />
+                      <Plus size={16} />
                       {t('addStopover')}
                     </button>
-                    <button
-                      className="sc-icon-button"
-                      aria-label={t('cancelStopoverSearch')}
-                      onClick={() => {
-                        setStopoverSearchOpen(false);
-                        setStopoverDraft({ label: '' });
-                      }}
-                    >
-                      <X size={16} />
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button
-                  className="sc-small-button sc-full-width"
-                  onClick={() => {
-                    setStopoverDraft({ label: '' });
-                    setStopoverSearchOpen(true);
-                  }}
-                  disabled={
-                    editingMode !== 'drive' || drivingStops.length >= 10 || !addressSearchEnabled
-                  }
-                >
-                  <Plus size={16} />
-                  {t('addStopover')}
-                </button>
+                  )}
+                  {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
+                  {stopoverRoutingBlocked && (
+                    <p className="sc-error" role="status">
+                      {t('transitStopoverUnsupported')}
+                    </p>
+                  )}
+                </section>
               )}
-              {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
-              {stopoverRoutingBlocked && (
-                <p className="sc-error" role="status">
-                  {t('transitStopoverUnsupported')}
-                </p>
-              )}
-            </section>
-          )}
-        {(!state.origin.label.trim() || !state.destination.label.trim()) && (
-          <p className="sc-error">{t('invalidLocation')}</p>
-        )}
-        <button className="sc-text-button" onClick={useLocation} disabled={locationLoading}>
-          <LocateFixed size={14} />
-          {t(locationLoading ? 'locating' : 'useLocation')}
-        </button>
-        {(!googleMode || !googleResponse) && (
-          <p className="sc-help">{t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}</p>
-        )}
-        {locationError && (
-          <p role="alert" className="sc-error">
-            {t('locationFailed')}
-          </p>
-        )}
-        {state.places.length > 0 && (
-          <details className="sc-saved-places">
-            <summary>
-              {t('savedPlaces')}
-              <ChevronDown size={14} />
-            </summary>
-            {state.places.map((place) => (
-              <div className="sc-saved-place" key={place.label}>
-                <span>{place.label}</span>
-                <button
-                  title={t('applyOrigin')}
-                  aria-label={`${t('applyOrigin')} ${place.label}`}
-                  onClick={() => setState((current) => ({ ...current, origin: place }))}
-                >
-                  <House size={14} />
-                </button>
-                <button
-                  title={t('applyDestination')}
-                  aria-label={`${t('applyDestination')} ${place.label}`}
-                  onClick={() => setState((current) => ({ ...current, destination: place }))}
-                >
-                  <MapPin size={14} />
-                </button>
-                <button
-                  aria-label={`${t('removePlace')} ${place.label}`}
-                  onClick={() =>
-                    setState((current) => ({
-                      ...current,
-                      places: current.places.filter((saved) => saved.label !== place.label),
-                    }))
-                  }
-                >
-                  <X size={14} />
-                </button>
-              </div>
-            ))}
-          </details>
-        )}
-        <div className="sc-schedule">
-          <label className="sc-checkbox">
-            <input
-              type="checkbox"
-              checked={state.settings.roundTrip}
-              onChange={(event) => updateSettings({ roundTrip: event.target.checked })}
-            />
-            <span>{t('roundTrip')}</span>
-          </label>
-          <label className="sc-checkbox">
-            <input
-              type="checkbox"
-              checked={state.leaveNow}
-              onChange={(event) =>
-                setState((current) => ({ ...current, leaveNow: event.target.checked }))
+            {renderLocationRow('destination')}
+            {renderDestinationHours()}
+            <button
+              className="sc-swap"
+              aria-label={t('swap')}
+              onClick={() =>
+                setState((current) => ({
+                  ...current,
+                  origin: current.destination,
+                  destination: current.origin,
+                  options: current.options.map((option) =>
+                    option.mode === 'drive' && !hasGoogleProvenance(option)
+                      ? { ...option, waypoints: [...option.waypoints].reverse() }
+                      : option,
+                  ),
+                }))
               }
-            />
-            <span>{t('leaveNow')}</span>
-          </label>
-          {!state.leaveNow && (
-            <label className="sc-field">
-              {t('departure')}
-              <input
-                type="datetime-local"
-                value={state.departure}
-                onChange={(event) =>
-                  setState((current) => ({ ...current, departure: event.target.value }))
-                }
-              />
-            </label>
+            >
+              <ArrowDownUp size={16} />
+            </button>
+          </div>
+          <div className="sc-location-actions">
+            <button className="sc-text-button" onClick={useLocation} disabled={locationLoading}>
+              <LocateFixed size={15} />
+              {t(locationLoading ? 'locating' : 'useLocation')}
+            </button>
+          </div>
+          {locationError && (
+            <p role="alert" className="sc-error">
+              {t('locationFailed')}
+            </p>
           )}
-          {state.settings.roundTrip && (
-            <label className="sc-field">
-              {t('returnTime')}
+          {(!googleMode || !googleResponse) && (
+            <p className="sc-help">{t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}</p>
+          )}
+          {state.places.length > 0 && (
+            <details className="sc-saved-places">
+              <summary>
+                {t('savedPlaces')}
+                <ChevronDown size={15} />
+              </summary>
+              {state.places.map((place) => (
+                <div className="sc-saved-place" key={place.label}>
+                  <span>{place.label}</span>
+                  <button
+                    className="sc-icon-button"
+                    title={t('applyOrigin')}
+                    aria-label={`${t('applyOrigin')} ${place.label}`}
+                    onClick={() => setState((current) => ({ ...current, origin: place }))}
+                  >
+                    <House size={15} />
+                  </button>
+                  <button
+                    className="sc-icon-button"
+                    title={t('applyDestination')}
+                    aria-label={`${t('applyDestination')} ${place.label}`}
+                    onClick={() => setState((current) => ({ ...current, destination: place }))}
+                  >
+                    <MapPin size={15} />
+                  </button>
+                  <button
+                    className="sc-icon-button"
+                    aria-label={`${t('removePlace')} ${place.label}`}
+                    onClick={() =>
+                      setState((current) => ({
+                        ...current,
+                        places: current.places.filter((saved) => saved.label !== place.label),
+                      }))
+                    }
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              ))}
+            </details>
+          )}
+        </section>
+        <section className="sc-input-section sc-schedule">
+          <div className="sc-schedule-toggles">
+            <label className="sc-checkbox">
               <input
-                type="datetime-local"
-                value={state.returnTime}
+                type="checkbox"
+                checked={state.settings.roundTrip}
+                onChange={(event) => updateSettings({ roundTrip: event.target.checked })}
+              />
+              <span>{t('roundTrip')}</span>
+            </label>
+            <label className="sc-checkbox">
+              <input
+                type="checkbox"
+                checked={state.leaveNow}
                 onChange={(event) =>
-                  setState((current) => ({ ...current, returnTime: event.target.value }))
+                  setState((current) => ({ ...current, leaveNow: event.target.checked }))
                 }
               />
+              <span>{t('leaveNow')}</span>
             </label>
+          </div>
+          {(!state.leaveNow || showReturnTime) && (
+            <div className="sc-field-grid">
+              {!state.leaveNow && (
+                <TextField
+                  type="datetime-local"
+                  label={t('departure')}
+                  value={state.departure}
+                  onChange={(departure) => setState((current) => ({ ...current, departure }))}
+                  error={departureInvalid ? t('departureRequired') : undefined}
+                />
+              )}
+              {showReturnTime && (
+                <TextField
+                  type="datetime-local"
+                  label={t('returnTime')}
+                  value={state.returnTime}
+                  onChange={(returnTime) => setState((current) => ({ ...current, returnTime }))}
+                  error={returnTimeMissing ? t('googleMissingReturn') : undefined}
+                />
+              )}
+            </div>
           )}
           <p
             className={`sc-help ${browserTimeZone !== 'Pacific/Auckland' ? 'sc-timezone-warning' : ''}`}
@@ -1952,155 +2434,98 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             {t('browserTimezone', { zone: browserTimeZone })}
             {browserTimeZone !== 'Pacific/Auckland' && ` ${t('aucklandTimeHint')}`}
           </p>
-        </div>
-        <div className="sc-divider" />
-        <h3 className="sc-section-heading">{t('chooseMode')}</h3>
-        {!googleMode && <p className="sc-help">{t('routeHint')}</p>}
-        <div className="sc-mode-switch" role="group" aria-label={t('routeParameters')}>
-          {(googleMode
-            ? (['drive', 'transit'] as const)
-            : (['drive', 'transit', 'hybrid'] as const)
-          ).map((mode) => (
-            <button
-              key={mode}
-              className={editingMode === mode ? 'is-active' : ''}
-              onClick={() => setEditingMode(mode)}
-              aria-pressed={editingMode === mode}
-            >
-              <ModeIcon mode={mode} size={16} />
-              <span>{t(mode)}</span>
-            </button>
-          ))}
-        </div>
-        {googleMode && (
-          <div className="sc-routing-actions">
-            <button
-              className="sc-small-button sc-full-width"
-              onClick={() => void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')}
-              disabled={
-                googleStatus !== 'ready' ||
-                comparison.error ||
-                stopoverRoutingBlocked ||
-                (state.settings.roundTrip && !state.returnTime)
-              }
-            >
-              <Route size={16} />
-              {t(googleStatus === 'routes' ? 'googleRoutesLoading' : 'planRoute')}
-            </button>
-            {state.settings.roundTrip && !state.returnTime && (
-              <p className="sc-help">{t('googleMissingReturn')}</p>
-            )}
-            {googleError && (
-              <p className="sc-error" role="alert">
-                {googleError}
-              </p>
-            )}
-            {googleRequests > 0 && <small>{t('googleMetrics', { count: googleRequests })}</small>}
-            {editingMode === 'transit' && (
-              <div className="sc-at-fare-link">
-                <a
-                  href="https://at.govt.nz/bus-train-ferry/journey-planner"
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {t('verifyATFare')}
-                </a>
-                <p className="sc-help">{t('atFareLinkHelp')}</p>
-              </div>
-            )}
-          </div>
-        )}
-        <details className="sc-advanced-inputs" open={!googleMode}>
-          <summary>
-            <Settings2 size={17} />
-            {t('adjustCosts')}
-            <ChevronDown size={16} />
-          </summary>
-          <div className="sc-advanced-content">
-            {editingMode !== 'transit' && (
-              <>
-                <div className="sc-section-title">
-                  <Fuel size={17} />
-                  <h3>{t('carParameters')}</h3>
-                </div>
-                <div className="sc-field-grid">
-                  <NumberField
-                    label={t('fuelPrice')}
-                    value={state.settings.fuelPrice}
-                    onChange={(fuelPrice) => updateSettings({ fuelPrice })}
-                    t={t}
-                  />
-                  <NumberField
-                    label={t('fuelConsumption')}
-                    value={state.settings.fuelConsumption}
-                    onChange={(fuelConsumption) => updateSettings({ fuelConsumption })}
-                    t={t}
-                  />
-                </div>
-              </>
-            )}
-            {visibleOptions
-              .filter(
-                (option) =>
-                  option.mode === editingMode &&
-                  (!googleMode || option.id === (selected?.id ?? selectedId)),
-              )
-              .map(renderOptionEditor)}
-            {!googleMode && editingMode === 'drive' && (
-              <button className="sc-small-button sc-full-width" onClick={addDrivingRoute}>
-                <Plus size={15} />
-                {t('alternativeRoute')}
+        </section>
+        <section className="sc-input-section">
+          <h3 className="sc-section-label">{t('chooseMode')}</h3>
+          <div className="sc-mode-switch" role="group" aria-label={t('routeParameters')}>
+            {(googleMode
+              ? (['drive', 'transit'] as const)
+              : (['drive', 'transit', 'hybrid'] as const)
+            ).map((mode) => (
+              <button
+                key={mode}
+                className={editingMode === mode ? 'is-active' : ''}
+                onClick={() => {
+                  setEditingMode(mode);
+                  if (googleMode && mode !== editingMode) setAutoPlanToken((count) => count + 1);
+                  // Keep the summary and schematic on the option being edited.
+                  const edited = comparison.result?.results.find((result) => result.mode === mode);
+                  if (!googleMode && edited && selected?.mode !== mode) selectResult(edited);
+                }}
+                aria-pressed={editingMode === mode}
+              >
+                <ModeIcon mode={mode} size={16} />
+                <span>{t(mode)}</span>
               </button>
-            )}
-            {state.savedRoutes.length > 0 && (
-              <details className="sc-saved-places">
-                <summary>
-                  {t('savedRoutes')}
-                  <ChevronDown size={14} />
-                </summary>
-                {state.savedRoutes.map((option) => (
-                  <div className="sc-saved-place" key={option.id}>
-                    <span>{nameOf(option)}</span>
-                    <button
-                      aria-label={`${t('loadRoute')} ${nameOf(option)}`}
-                      onClick={() => {
-                        if (usesATFare(option, state.settings.roundTrip))
-                          setATFareContexts((current) => {
-                            const next = { ...current };
-                            delete next[option.id];
-                            return next;
-                          });
-                        setState((current) => ({
-                          ...current,
-                          options: [
-                            ...current.options.filter((route) => route.id !== option.id),
-                            cloneOption(option),
-                          ],
-                        }));
-                        setEditingMode(option.mode);
-                      }}
-                    >
-                      <RotateCcw size={14} />
-                    </button>
-                    <button
-                      aria-label={`${t('deleteSavedRoute')} ${nameOf(option)}`}
-                      onClick={() =>
-                        setState((current) => ({
-                          ...current,
-                          savedRoutes: current.savedRoutes.filter(
-                            (route) => route.id !== option.id,
-                          ),
-                        }))
-                      }
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </details>
-            )}
+            ))}
           </div>
-        </details>
+          {googleMode ? (
+            <>
+              <div className="sc-routing-actions">
+                <button
+                  className="sc-primary-button sc-full-width"
+                  onClick={() =>
+                    void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')
+                  }
+                  disabled={
+                    googleStatus !== 'ready' ||
+                    comparison.error ||
+                    stopoverRoutingBlocked ||
+                    departureInvalid ||
+                    returnTimeMissing
+                  }
+                >
+                  <Route size={16} />
+                  {t(googleStatus === 'routes' ? 'googleRoutesLoading' : 'planRoute')}
+                </button>
+                {googleError && (
+                  <p className="sc-error" role="alert">
+                    {googleError}
+                  </p>
+                )}
+                {googleRequests > 0 && (
+                  <small className="sc-help">{t('googleMetrics', { count: googleRequests })}</small>
+                )}
+                {editingMode === 'transit' && (
+                  <div className="sc-at-fare-link">
+                    <a
+                      href="https://at.govt.nz/bus-train-ferry/journey-planner"
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      {t('verifyATFare')}
+                    </a>
+                    <p className="sc-help">{t('atFareLinkHelp')}</p>
+                  </div>
+                )}
+              </div>
+              <details className="sc-advanced-inputs">
+                <summary>
+                  {t('adjustCosts')}
+                  <ChevronDown size={16} />
+                </summary>
+                <div className="sc-advanced-content">
+                  {editingMode !== 'transit' && renderCarFields()}
+                  {editorOptions.map((option) => renderOptionEditor(option, true))}
+                  {renderSavedRoutes()}
+                </div>
+              </details>
+            </>
+          ) : (
+            <div className="sc-mode-editor">
+              <p className="sc-help">{t('routeHint')}</p>
+              {editingMode !== 'transit' && renderCarFields()}
+              {editorOptions.map((option) => renderOptionEditor(option, editorOptions.length > 1))}
+              {editingMode === 'drive' && (
+                <button className="sc-text-button" onClick={addDrivingRoute}>
+                  <Plus size={15} />
+                  {t('alternativeRoute')}
+                </button>
+              )}
+              {renderSavedRoutes()}
+            </div>
+          )}
+        </section>
         {props.googleApiKey && !googleMode && (
           <div className="sc-manual-fallback">
             <p>{t(!online ? 'offlineFallback' : 'manualFallback')}</p>
@@ -2119,307 +2544,427 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             {t('useManualInputs')}
           </button>
         )}
-        {!googleMode && (
-          <p className="sc-help sc-return-note">
-            <Info size={13} />
-            {t('estimatedReturn')}
-          </p>
-        )}
-      </div>
-    </aside>
-  );
+        {!googleMode && <p className="sc-help sc-return-note">{t('estimatedReturn')}</p>}
+      </section>
+    );
+  };
 
-  const renderSchematic = () => (
-    <section className="sc-map-panel" aria-label={t(googleMode ? 'googleMapTitle' : 'schematic')}>
-      <div className="sc-map-toolbar">
-        <span>
-          <Compass size={17} />
-          {t(googleMode ? 'googleMapTitle' : 'schematic')}
-        </span>
-        <div className="sc-map-tools">
-          {googleMode && (editingMode === 'drive' || mapStopoverPicking) && (
-            <button
-              className="sc-small-button"
-              onClick={mapStopoverPicking ? cancelMapStopoverPick : beginMapStopoverPick}
-              disabled={
-                !mapStopoverPicking &&
-                (googleStatus !== 'ready' || editingMode !== 'drive' || drivingStops.length >= 10)
-              }
-              aria-pressed={mapStopoverPicking}
-            >
-              {mapStopoverPicking ? <X size={14} /> : <Plus size={14} />}
-              {t(mapStopoverPicking ? 'cancelStopoverPick' : 'pickStopoverOnMap')}
-            </button>
-          )}
-        </div>
-      </div>
-      {googleMode && (
-        <div className="sc-map-stage">
-          <div
-            className="sc-google-map"
-            ref={googleMapRef}
-            aria-label={t('googleMapDescription')}
-          />
-          {mapStopoverPicking && (
-            <p className="sc-map-stopover-prompt" role="status">
-              {t('pickStopoverHint')}
-            </p>
-          )}
-          {(googleStatus === 'idle' || googleStatus === 'loading') && (
-            <div className="sc-map-loading" role="status">
-              {t('googleLoading')}
-            </div>
-          )}
-          {googleStatus === 'routes' && (
-            <p className="sc-help" role="status">
-              {t('googleRoutesLoading')}
-            </p>
-          )}
-        </div>
-      )}
-      {!googleMode && (
-        <>
-          <div className="sc-schematic-canvas">
-            <div className="sc-map-contour contour-one" />
-            <div className="sc-map-contour contour-two" />
-            <div className="sc-map-contour contour-three" />
-            <div className="sc-diagram-line" />
-            <div className="sc-diagram-node sc-node-start">
-              <div className="sc-node-icon">
-                <House size={23} />
-              </div>
-              <div className="sc-node-label">
-                <span>{t('start')}</span>
-                <strong>{state.origin.label || '—'}</strong>
-              </div>
-            </div>
-            <div className="sc-diagram-node sc-node-hub">
-              <div className="sc-node-icon">
-                <TrainFront size={22} />
-              </div>
-              <div className="sc-node-label">
-                <span>{t('interchange')}</span>
-                <strong>
-                  {state.options.find((option) => option.mode === 'hybrid')?.waypoints[0]?.label ||
-                    t('hub')}
-                </strong>
-                <small>{t('hybrid')}</small>
-              </div>
-            </div>
-            <div className="sc-diagram-node sc-node-end">
-              <div className="sc-node-icon">
-                <MapPin size={24} />
-              </div>
-              <div className="sc-node-label">
-                <span>{t('finish')}</span>
-                <strong>{state.destination.label || '—'}</strong>
-              </div>
-            </div>
-            <span className="sc-schematic-note">{t('schematicNote')}</span>
-          </div>
-          <div className="sc-map-explainer">
-            <span className="sc-icon-tile">
-              <Leaf size={20} />
-            </span>
-            <div>
-              <h3>{t('manualMapTitle')}</h3>
-              <p>{t('manualMapBody')}</p>
-            </div>
-          </div>
-          <p className="sc-map-footnote">{t('mapFooter')}</p>
-        </>
-      )}
-    </section>
-  );
+  const legIcon = (mode: TravelLeg['mode']) =>
+    mode === 'drive' ? (
+      <Car size={16} />
+    ) : mode === 'bus' ? (
+      <Bus size={16} />
+    ) : mode === 'train' ? (
+      <TrainFront size={16} />
+    ) : (
+      <Route size={16} />
+    );
 
-  const renderResults = () => (
-    <aside className="sc-results-panel">
-      <div className="sc-results-heading">
-        <div>
-          <h2>{t('yourOptions')}</h2>
-          <p>{t('optionCount', { count: comparison.result?.results.length ?? 0 })}</p>
-        </div>
-        <span className="sc-mini-pill">
-          {t(state.settings.roundTrip ? 'returnIncluded' : 'oneWay')}
+  const renderSchematic = () => {
+    const diagramMode = selected?.mode ?? editingMode;
+    const legs = selected?.option.outbound ?? [];
+    const mainLegs = legs.filter((leg) => !minorModes.has(leg.mode));
+    const minorMinutes = legs
+      .filter((leg) => minorModes.has(leg.mode))
+      .reduce((total, leg) => total + leg.durationMinutes, 0);
+    const hubLabel =
+      selected?.option.waypoints[0]?.label ||
+      state.options.find((option) => option.mode === 'hybrid')?.waypoints[0]?.label ||
+      '';
+    const stop = (key: string, label: string, place: string, kind: 'start' | 'hub' | 'end') => (
+      <li className={`sc-schematic-stop sc-stop-${kind}`} key={key}>
+        <span className="sc-stop-marker" aria-hidden="true">
+          {kind === 'start' ? <House size={14} /> : kind === 'end' ? <MapPin size={14} /> : null}
         </span>
-      </div>
-      {hasFareRanges && <p className="sc-help sc-range-ranking-note">{t('fareRangeRankHelp')}</p>}
-      {comparison.error && (
-        <div className="sc-empty-state" role="alert">
-          <Info size={26} />
-          <h3>{t('validationSummary')}</h3>
-          <p>{t('noResults')}</p>
-        </div>
-      )}
-      {!comparison.error && !comparison.result && (
-        <div className="sc-empty-state">
-          <Info size={26} />
-          <h3>{t(googleMode ? 'planRoutePrompt' : noComparableRoutesKey)}</h3>
-        </div>
-      )}
-      {cardResults
-        .filter(
-          (result, index) =>
-            !googleMode || showAllRoutes || index < 3 || result.id === selected?.id,
-        )
-        .map((result) => {
-          const transitLegs = result.option.outbound.flatMap((leg) =>
-            leg.transit ? [leg.transit] : [],
-          );
-          const lines = [
-            ...new Set(
-              transitLegs
-                .map((leg) => leg.lineShortName || leg.lineName)
-                .filter((line): line is string => Boolean(line)),
-            ),
-          ];
-          const departureStop = transitLegs.find((leg) => leg.departureStop)?.departureStop;
-          const arrivalStop = [...transitLegs]
-            .reverse()
-            .find((leg) => leg.arrivalStop)?.arrivalStop;
-          return (
-            <button
-              key={result.id}
-              className={`sc-result-card ${selected?.id === result.id ? 'is-selected' : ''}`}
-              onClick={() => selectResult(result)}
-              aria-label={[
-                t('selectRoute', {
-                  name: lines.length ? t('routeLine', { line: lines.join(' · ') }) : nameOf(result),
-                }),
-                departureStop && arrivalStop ? `${departureStop} → ${arrivalStop}` : '',
-                moneyWithRange(result.totalCost, result.totalCostRange),
-                t('minutes', { count: shortNumber(result.totalMinutes) }),
+        <span className="sc-stop-text">
+          <span>{label}</span>
+          <strong>{place || '—'}</strong>
+        </span>
+      </li>
+    );
+    const steps: ReactNode[] = [stop('start', t('start'), state.origin.label, 'start')];
+    mainLegs.forEach((leg, index) => {
+      const previous = mainLegs[index - 1];
+      if (diagramMode === 'hybrid' && previous?.mode === 'drive' && leg.mode !== 'drive')
+        steps.push(stop(`hub-${index}`, t('interchange'), placeLabel(hubLabel) || t('hub'), 'hub'));
+      steps.push(
+        <li className={`sc-schematic-leg sc-leg-${leg.mode}`} key={`leg-${index}`}>
+          <span className="sc-leg-icon" aria-hidden="true">
+            {legIcon(leg.mode)}
+          </span>
+          <span className="sc-leg-text">
+            <strong>{t(legKeys[leg.mode])}</strong>
+            <span>
+              {[
+                t('minutes', { count: shortNumber(leg.durationMinutes) }),
+                leg.distanceKm !== undefined ? t('km', { count: shortNumber(leg.distanceKm) }) : '',
               ]
                 .filter(Boolean)
                 .join(' · ')}
-              aria-pressed={selected?.id === result.id}
-              data-testid={`route-card-${result.id}`}
-            >
-              <div className="sc-result-top">
-                <span className={`sc-mode-icon sc-mode-${result.mode}`}>
-                  <ModeIcon mode={result.mode} />
-                </span>
-                <div>
-                  <strong>
-                    {lines.length ? t('routeLine', { line: lines.join(' · ') }) : nameOf(result)}
-                  </strong>
-                  <span className="sc-result-source">
-                    {hasGoogleProvenance(result.option)
-                      ? t(result.totalCostRange ? 'fareRangeSource' : 'googleVerifiedGeometry')
-                      : [...result.option.outbound, ...result.option.inbound].some(
-                            (leg) => leg.source === 'at-rule',
-                          )
-                        ? t('atFareSource')
-                        : t('manual')}
-                  </span>
-                  {lines.length > 0 && departureStop && arrivalStop && (
-                    <span className="sc-result-stops">
-                      {departureStop} → {arrivalStop}
-                    </span>
-                  )}
-                </div>
-                {selected?.id === result.id && <Check size={16} className="sc-selection-check" />}
+            </span>
+          </span>
+        </li>,
+      );
+    });
+    steps.push(stop('end', t('finish'), state.destination.label, 'end'));
+    return (
+      <section className="sc-map-panel" aria-label={t(googleMode ? 'googleMapTitle' : 'schematic')}>
+        <div className="sc-map-toolbar">
+          <span>{t(googleMode ? 'googleMapTitle' : 'schematic')}</span>
+          <div className="sc-map-tools">
+            {googleMode && (
+              <button
+                className="sc-small-button"
+                onClick={mapDestinationPicking ? cancelMapDestinationPick : beginMapDestinationPick}
+                disabled={!mapDestinationPicking && googleStatus !== 'ready'}
+                aria-pressed={mapDestinationPicking}
+              >
+                {mapDestinationPicking ? <X size={15} /> : <MapPin size={15} />}
+                {t(mapDestinationPicking ? 'cancelDestinationPick' : 'pickDestinationOnMap')}
+              </button>
+            )}
+            {googleMode && (editingMode === 'drive' || mapStopoverPicking) && (
+              <button
+                className="sc-small-button"
+                onClick={mapStopoverPicking ? cancelMapStopoverPick : beginMapStopoverPick}
+                disabled={
+                  !mapStopoverPicking &&
+                  (googleStatus !== 'ready' || editingMode !== 'drive' || drivingStops.length >= 10)
+                }
+                aria-pressed={mapStopoverPicking}
+              >
+                {mapStopoverPicking ? <X size={15} /> : <Plus size={15} />}
+                {t(mapStopoverPicking ? 'cancelStopoverPick' : 'pickStopoverOnMap')}
+              </button>
+            )}
+          </div>
+        </div>
+        <WeatherBar
+          state={weather}
+          locale={locale}
+          originLabel={state.origin.label.split(',')[0]?.trim() || state.origin.label}
+        />
+        {googleMode && (
+          <div className="sc-map-stage">
+            <div
+              className="sc-google-map"
+              ref={googleMapRef}
+              aria-label={t('googleMapDescription')}
+            />
+            {(mapStopoverPicking || mapDestinationPicking) && (
+              <p className="sc-map-stopover-prompt" role="status">
+                {t(mapDestinationPicking ? 'pickDestinationHint' : 'pickStopoverHint')}
+              </p>
+            )}
+            {(googleStatus === 'idle' || googleStatus === 'loading') && (
+              <div className="sc-map-loading" role="status">
+                {t('googleLoading')}
               </div>
-              <div className="sc-result-value">
-                <span
-                  className={`sc-money ${result.totalCostRange ? 'sc-money-range' : ''}`}
-                  data-testid={`cost-${result.id}`}
-                >
-                  {moneyWithRange(result.totalCost, result.totalCostRange)}
-                </span>
-                <span>{t('perCommute')}</span>
+            )}
+            {googleStatus === 'routes' && (
+              <p className="sc-help" role="status">
+                {t('googleRoutesLoading')}
+              </p>
+            )}
+          </div>
+        )}
+        {!googleMode && (
+          <div className="sc-schematic" data-mode={diagramMode}>
+            <p className="sc-schematic-caption">
+              {t('outboundRoute')} · {selected ? nameOf(selected) : t(diagramMode)}
+            </p>
+            <ol className="sc-schematic-route">{steps}</ol>
+            {minorMinutes > 0 && (
+              <p className="sc-help">{t('minorLegs', { minutes: shortNumber(minorMinutes) })}</p>
+            )}
+            <p className="sc-schematic-note">{t('schematicNote')}</p>
+            <div className="sc-map-explainer">
+              <h3>{t('manualMapTitle')}</h3>
+              <p>{t('manualMapBody')}</p>
+              <p>{t('mapFooter')}</p>
+            </div>
+          </div>
+        )}
+      </section>
+    );
+  };
+
+  const resultSource = (result: RouteResult) =>
+    hasGoogleProvenance(result.option)
+      ? t(result.totalCostRange ? 'fareRangeSource' : 'googleVerifiedGeometry')
+      : [...result.option.outbound, ...result.option.inbound].some(
+            (leg) => leg.source === 'at-rule',
+          )
+        ? t('atFareSource')
+        : t('manual');
+  // A tied metric is not a distinction worth labelling on a card.
+  const uniquelyBest = (result: RouteResult, metric: 'totalMinutes' | 'transfers') =>
+    (comparison.result?.results ?? []).every(
+      (other) => other.id === result.id || other[metric] > result[metric],
+    );
+
+  // The selected option expands in place, so its figures are never stated twice.
+  const renderSelectedDetail = (result: RouteResult) => (
+    <div className="sc-result-detail" ref={summaryRef}>
+      {departureAt !== undefined && (
+        <p className="sc-detail-clock">
+          {t('outboundClock', {
+            span: clockSpan(departureAt, result.breakdown.outbound.totalMinutes),
+          })}
+          {returnAt !== undefined &&
+            ` · ${t('returnClock', { span: clockSpan(returnAt, result.breakdown.inbound.totalMinutes) })}`}
+          {` · ${t('aucklandTime')}`}
+        </p>
+      )}
+      <div className="sc-detail-figure">
+        <span>{t('generalizedCostPerCommute')}</span>
+        <strong>{moneyWithRange(result.generalizedCost, generalizedRange(result))}</strong>
+        <p>{t('timeValueRate', { value: money(state.settings.valueOfTime) })}</p>
+      </div>
+      <div className="sc-projection sc-detail-figure">
+        <span>{t('monthlyProjection')}</span>
+        <strong className={result.monthlyCostRange ? 'sc-projection-range' : ''}>
+          {moneyWithRange(result.monthlyCost, result.monthlyCostRange)}
+        </strong>
+        <p>
+          {t('costUnit')} · {t('perMonth')} ·{' '}
+          {t('basedOn', {
+            days: state.settings.daysPerWeek,
+            weeks: state.settings.weeksPerMonth,
+          })}
+        </p>
+      </div>
+      <button className="sc-text-button" onClick={() => setScreen('breakdown')}>
+        {t('viewBreakdown')}
+        <ArrowRight size={15} />
+      </button>
+    </div>
+  );
+
+  const renderGoogleAttribution = () =>
+    googleResponse && (
+      <section className="sc-google-attribution" aria-label={t('googleDetails')}>
+        <strong>{googleResponse.attribution}</strong>
+        <span>{t('googleDetails')}</span>
+        {googleResponse.attributionLinks?.map((link) =>
+          link.url ? (
+            <a key={`${link.label}-${link.url}`} href={link.url} target="_blank" rel="noreferrer">
+              {link.label}
+            </a>
+          ) : (
+            <span key={link.label}>{link.label}</span>
+          ),
+        )}
+        {googleResponse.warnings.map((warning) => {
+          const key = providerNoteKeys.find(([prefix]) => warning.startsWith(prefix))?.[1];
+          return <p key={warning}>{key ? t(key) : warning}</p>;
+        })}
+      </section>
+    );
+
+  const renderResults = () => {
+    const shownCards = cardResults.filter(
+      (result, index) => !googleMode || showAllRoutes || index < 3 || result.id === selected?.id,
+    );
+    const sources = new Set(shownCards.map(resultSource));
+    const sharedSource = sources.size === 1 ? [...sources][0] : '';
+    const drivingParkingUnverified = shownCards.some(
+      (result) => result.mode === 'drive' && result.warnings.includes('unverified-parking'),
+    );
+    return (
+      <section
+        className="sc-results-panel"
+        ref={resultsRef}
+        tabIndex={-1}
+        aria-labelledby={`${plannerId}-results-title`}
+      >
+        <div className="sc-results-heading">
+          <div>
+            <h2 id={`${plannerId}-results-title`}>{t('yourOptions')}</h2>
+            <p>
+              {t('optionCount', { count: comparison.result?.results.length ?? 0 })} ·{' '}
+              {t('costUnit')} · <span>{tripScope}</span> · {t('perCommute')}
+              {departureAt !== undefined && ` · ${t('aucklandTime')}`}
+            </p>
+          </div>
+          {(comparison.result?.results.length ?? 0) > 1 && (
+            <div className="sc-sort-group">
+              <span className="sc-sort-label" aria-hidden="true">
+                {t('sortBy')}
+              </span>
+              <div className="sc-sort" role="group" aria-label={t('sortBy')}>
+                {(['cost', 'time', 'value'] as const).map((key) => (
+                  <button
+                    key={key}
+                    aria-pressed={sortBy === key}
+                    className={sortBy === key ? 'is-active' : ''}
+                    onClick={() => setSortBy(key)}
+                  >
+                    {t(key === 'cost' ? 'sortCost' : key === 'time' ? 'sortTime' : 'sortValue')}
+                  </button>
+                ))}
               </div>
-              <div className="sc-result-meta">
-                <span>
-                  <Clock3 size={13} />
-                  {t('minutes', { count: shortNumber(result.totalMinutes) })}
-                </span>
-                <span>{t('km', { count: shortNumber(result.distanceKm) })}</span>
-                <span>{t('transferCount', { count: result.transfers })}</span>
-              </div>
-              <div className="sc-result-badges">
-                {comparison.result?.cheapest.id === result.id && (
-                  <span className="sc-badge sc-badge-green">
-                    <Wallet size={11} />
+            </div>
+          )}
+        </div>
+        {comparison.error && (
+          <div className="sc-empty-state" role="alert">
+            <h3>{t('validationSummary')}</h3>
+            <p>{t('noResults')}</p>
+          </div>
+        )}
+        {!comparison.error && !comparison.result && (
+          <div className="sc-empty-state">
+            <h3>{t(googleMode ? 'planRoutePrompt' : noComparableRoutesKey)}</h3>
+          </div>
+        )}
+        {shownCards.length > 0 && (
+          <ol className="sc-option-list">
+            {shownCards.map((result) => {
+              const transitLegs = result.option.outbound.flatMap((leg) =>
+                leg.transit ? [leg.transit] : [],
+              );
+              const lines = [
+                ...new Set(
+                  transitLegs
+                    .map((leg) => leg.lineShortName || leg.lineName)
+                    .filter((line): line is string => Boolean(line)),
+                ),
+              ];
+              const departureStop = transitLegs.find((leg) => leg.departureStop)?.departureStop;
+              const arrivalStop = [...transitLegs]
+                .reverse()
+                .find((leg) => leg.arrivalStop)?.arrivalStop;
+              const isSelected = selected?.id === result.id;
+              const label = lines.length
+                ? t('routeLine', { line: lines.join(' · ') })
+                : nameOf(result);
+              const tags = [
+                comparison.result?.cheapest.id === result.id && (
+                  <span className="sc-tag-primary" key="cheapest">
                     {rankingLabel('cheapest')}
                   </span>
-                )}
-                {comparison.result?.fastest.id === result.id && (
-                  <span className="sc-badge sc-badge-blue">
-                    <Clock3 size={11} />
-                    {t('fastest')}
+                ),
+                comparison.result?.fastest.id === result.id &&
+                  uniquelyBest(result, 'totalMinutes') && (
+                    <span className="sc-tag-primary" key="fastest">
+                      {t('fastest')}
+                    </span>
+                  ),
+                comparison.result?.bestValue.id === result.id && (
+                  <span className="sc-tag-quiet" key="best-value">
+                    {rankingLabel('bestValue')}
                   </span>
-                )}
-                {comparison.result?.bestValue.id === result.id && (
-                  <span className="sc-badge sc-badge-neutral">{rankingLabel('bestValue')}</span>
-                )}
-                {comparison.result?.fewestTransfers.id === result.id && (
-                  <span className="sc-badge sc-badge-neutral">{t('fewestTransfers')}</span>
-                )}
-              </div>
-              {result.totalCostRange && selected?.id === result.id && (
-                <span className="sc-result-warning sc-fare-range-warning">
-                  <Info size={12} />
-                  {t('fareRangeBadge')} · {t(fareExplanationKey(result.option))}
-                </span>
-              )}
-              {result.warnings.includes('unverified-parking') && (
-                <span className="sc-result-warning">
-                  <Info size={12} />
-                  {t('parkingWarning')}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      {googleMode && (comparison.result?.results.length ?? 0) > 3 && (
-        <button
-          className="sc-show-routes"
-          onClick={() => setShowAllRoutes((current) => !current)}
-          aria-expanded={showAllRoutes}
-        >
-          {t(showAllRoutes ? 'showFewerRoutes' : 'showAllRoutes', {
-            count: comparison.result!.results.length,
-          })}
-          <ChevronDown size={16} />
-        </button>
-      )}
-      {selected && (
-        <div className="sc-projection">
-          <span>
-            <Wallet size={16} />
-            {t('monthlyProjection')}
-          </span>
-          <strong className={selected.monthlyCostRange ? 'sc-projection-range' : ''}>
-            {moneyWithRange(selected.monthlyCost, selected.monthlyCostRange)}
-          </strong>
-          <p>
-            {t('basedOn', {
-              days: state.settings.daysPerWeek,
-              weeks: state.settings.weeksPerMonth,
+                ),
+                comparison.result?.fewestTransfers.id === result.id &&
+                  uniquelyBest(result, 'transfers') && (
+                    <span className="sc-tag-quiet" key="fewest-transfers">
+                      {t('fewestTransfers')}
+                    </span>
+                  ),
+              ].filter(Boolean);
+              return (
+                <li key={result.id} className={`sc-option ${isSelected ? 'is-selected' : ''}`}>
+                  <button
+                    className="sc-result-card"
+                    onClick={() => selectResult(result)}
+                    aria-label={[
+                      t('selectRoute', { name: label }),
+                      departureStop && arrivalStop ? `${departureStop} → ${arrivalStop}` : '',
+                      moneyWithRange(result.totalCost, result.totalCostRange),
+                      t('minutes', { count: shortNumber(result.totalMinutes) }),
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')}
+                    aria-pressed={isSelected}
+                    data-testid={`route-card-${result.id}`}
+                  >
+                    <span className="sc-result-radio" aria-hidden="true" />
+                    <span className="sc-result-main">
+                      <span className="sc-result-name">{label}</span>
+                      {departureAt !== undefined && (
+                        <span className="sc-result-clock">
+                          {clockSpan(departureAt, result.breakdown.outbound.totalMinutes)}
+                        </span>
+                      )}
+                      <span className="sc-result-meta">
+                        {[
+                          distanceText(result),
+                          t('transferCount', { count: result.transfers }),
+                        ].join(' · ')}
+                      </span>
+                      {lines.length > 0 && departureStop && arrivalStop && (
+                        <span className="sc-result-stops">
+                          {departureStop} → {arrivalStop}
+                        </span>
+                      )}
+                      {!sharedSource && (
+                        <span className="sc-result-source">{resultSource(result)}</span>
+                      )}
+                      {tags.length > 0 && <span className="sc-result-tags">{tags}</span>}
+                      {result.totalCostRange && isSelected && (
+                        <span className="sc-result-warning">
+                          {t('fareRangeBadge')} · {t(fareExplanationKey(result.option))}
+                        </span>
+                      )}
+                      {result.mode === 'hybrid' &&
+                        result.warnings.includes('unverified-parking') && (
+                          <span className="sc-result-warning">{t('parkingWarning')}</span>
+                        )}
+                    </span>
+                    <span className="sc-result-figures">
+                      <span
+                        key={isSelected ? valueUpdates : 0}
+                        className={`sc-money ${result.totalCostRange ? 'sc-money-range' : ''} ${isSelected && valueUpdates ? 'sc-value-updated' : ''}`}
+                        data-testid={`cost-${result.id}`}
+                      >
+                        {moneyWithRange(result.totalCost, result.totalCostRange)}
+                      </span>
+                      <span className="sc-result-duration">
+                        {wholeMinutes(result.totalMinutes)}
+                      </span>
+                    </span>
+                  </button>
+                  {isSelected && renderSelectedDetail(result)}
+                </li>
+              );
             })}
-          </p>
-        </div>
-      )}
-      {comparison.result && comparison.result.results.length > 1 && (
-        <div className="sc-recommendation">
-          <span className="sc-recommend-icon">
-            <Leaf size={18} />
-          </span>
-          <div>
+          </ol>
+        )}
+        {googleMode && (comparison.result?.results.length ?? 0) > 3 && (
+          <button
+            className="sc-show-routes"
+            onClick={() => setShowAllRoutes((current) => !current)}
+            aria-expanded={showAllRoutes}
+          >
+            {t(showAllRoutes ? 'showFewerRoutes' : 'showAllRoutes', {
+              count: comparison.result!.results.length,
+            })}
+            <ChevronDown size={16} />
+          </button>
+        )}
+        {shownCards.length > 0 && (
+          <div className="sc-results-notes">
+            {sharedSource && <p>{t('sharedSource', { source: sharedSource })}</p>}
+            {drivingParkingUnverified && <p>{t('drivingParkingNote')}</p>}
+            {hasFareRanges && <p>{t('fareRangeRankHelp')}</p>}
+          </div>
+        )}
+        {comparison.result && comparison.result.results.length > 1 && (
+          <div className="sc-recommendation">
             <h3>{t('recommendation')}</h3>
-            <p>
-              {hasFareRanges
-                ? t('fareRangeRankHelp')
-                : t('savingReason', {
-                    cheapest: nameOf(comparison.result.cheapest),
-                    other: nameOf(comparison.result.results[comparison.result.results.length - 1]),
-                    saving: money(
-                      comparison.result.results[comparison.result.results.length - 1].totalCost -
-                        comparison.result.cheapest.totalCost,
-                    ),
-                  })}
-            </p>
+            {!hasFareRanges && (
+              <p>
+                {t('savingReason', {
+                  cheapest: nameOf(comparison.result.cheapest),
+                  other: nameOf(comparison.result.results[comparison.result.results.length - 1]),
+                  saving: money(
+                    comparison.result.results[comparison.result.results.length - 1].totalCost -
+                      comparison.result.cheapest.totalCost,
+                  ),
+                })}
+              </p>
+            )}
             {comparison.result.cheapest.totalMinutes > comparison.result.fastest.totalMinutes && (
               <p>
                 {t('slowerReason', {
@@ -2436,15 +2981,24 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 name: nameOf(comparison.result.bestValue),
               })}
             </p>
+            <button className="sc-text-button" onClick={() => setScreen('comparison')}>
+              {t('comparison')}
+              <ArrowRight size={15} />
+            </button>
           </div>
-        </div>
-      )}
-      <button className="sc-text-button sc-results-link" onClick={() => setScreen('comparison')}>
-        {t('comparison')}
-        <ArrowRight size={15} />
-      </button>
-    </aside>
-  );
+        )}
+      </section>
+    );
+  };
+
+  const showResults = () => {
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    resultsRef.current?.scrollIntoView({
+      block: 'start',
+      behavior: reduceMotion ? 'auto' : 'smooth',
+    });
+    resultsRef.current?.focus({ preventScroll: true });
+  };
 
   const renderComparison = () => (
     <section className="sc-page-content">
@@ -2476,6 +3030,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               );
             })}
           </div>
+          <p className="sc-scope-note">
+            {t('amountsInNzd')} · {tripScope}
+          </p>
           <div className="sc-table-wrap">
             <table>
               <thead>
@@ -2483,7 +3040,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                   {(
                     [
                       'route',
-                      'cost',
+                      'costPerCommute',
                       'time',
                       'transfers',
                       'weekly',
@@ -2534,16 +3091,16 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const renderBreakdown = () => {
     const pieces: { key: MessageKey; value: number; range?: CostRange; color: string }[] = selected
       ? [
-          { key: 'fuel', value: selected.fuelCost, color: '#007f6d' },
+          { key: 'fuel', value: selected.fuelCost, color: '#2b8b5f' },
           {
             key: 'fares',
             value: selected.fareCost,
             range: selected.fareCostRange,
-            color: '#a4bd73',
+            color: '#6a9bb4',
           },
-          { key: 'parkingLabel', value: selected.parkingCost, color: '#dfba73' },
-          { key: 'tolls', value: selected.tollCost, color: '#839daf' },
-          { key: 'maintenance', value: selected.maintenanceCost, color: '#ad97b6' },
+          { key: 'parkingLabel', value: selected.parkingCost, color: '#cc942e' },
+          { key: 'tolls', value: selected.tollCost, color: '#cc978c' },
+          { key: 'maintenance', value: selected.maintenanceCost, color: '#8f7968' },
         ]
       : [];
     return (
@@ -2572,7 +3129,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 <h2>{t('components')}</h2>
                 <div className="sc-breakdown-total">
                   <strong>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</strong>
-                  <span>{t('perCommute')}</span>
+                  <span>
+                    {t('costUnit')} · {tripScope} · {t('perCommute')}
+                  </span>
                 </div>
                 <div
                   className="sc-stacked-bar"
@@ -2610,6 +3169,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               </div>
               <div className="sc-surface sc-budget-surface">
                 <h2>{t('commutingPattern')}</h2>
+                <p className="sc-scope-note">
+                  {t('amountsInNzd')} · {tripScope}
+                </p>
                 <div className="sc-budget-number">
                   <span>{t('weekly')}</span>
                   <strong>{moneyWithRange(selected.weeklyCost, selected.weeklyCostRange)}</strong>
@@ -2627,11 +3189,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 <div className="sc-divider" />
                 <dl className="sc-cost-lines">
                   <div>
-                    <dt>{t('timeValue')}</dt>
+                    <dt>{t('timeValuePerCommute')}</dt>
                     <dd>{money(selected.generalizedCost - selected.totalCost)}</dd>
                   </div>
                   <div>
-                    <dt>{t('generalizedCost')}</dt>
+                    <dt>{t('generalizedCostPerCommute')}</dt>
                     <dd>{moneyWithRange(selected.generalizedCost, generalizedRange(selected))}</dd>
                   </div>
                 </dl>
@@ -2665,7 +3227,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                         <span>
                           {leg.distanceKm !== undefined
                             ? t('km', { count: shortNumber(leg.distanceKm) })
-                            : '—'}
+                            : distanceModes.has(leg.mode)
+                              ? t('distanceNotEntered')
+                              : '—'}
                         </span>
                         <span className="sc-tag">
                           {leg.source === 'google'
@@ -2709,10 +3273,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       </div>
       <div className="sc-settings-grid">
         <div className="sc-surface">
-          <div className="sc-section-title">
-            <Fuel size={20} />
-            <h2>{t('carParameters')}</h2>
-          </div>
+          <h2>{t('carParameters')}</h2>
           <div className="sc-field-grid">
             <NumberField
               label={t('fuelPrice')}
@@ -2737,10 +3298,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <p className="sc-help">{t('upkeepExplanation')}</p>
         </div>
         <div className="sc-surface">
-          <div className="sc-section-title">
-            <Clock3 size={20} />
-            <h2>{t('commutingPattern')}</h2>
-          </div>
+          <h2>{t('commutingPattern')}</h2>
           <div className="sc-field-grid">
             <NumberField
               label={t('daysPerWeek')}
@@ -2774,7 +3332,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               className={theme === 'light' ? 'is-active' : ''}
               onClick={() => setTheme('light')}
             >
-              <Sun size={20} />
+              <Sun size={17} />
               {t('light')}
             </button>
             <button
@@ -2782,7 +3340,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               className={theme === 'dark' ? 'is-active' : ''}
               onClick={() => setTheme('dark')}
             >
-              <Moon size={20} />
+              <Moon size={17} />
               {t('dark')}
             </button>
           </div>
@@ -2795,9 +3353,6 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           </label>
         </div>
         <div className="sc-surface">
-          <span className="sc-icon-tile">
-            <ShieldCheck size={23} />
-          </span>
           <h2>{t('privacy')}</h2>
           <p>{t('storageNote')}</p>
           <button
@@ -2840,18 +3395,12 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       </div>
       <div className="sc-about-grid">
         <div className="sc-surface sc-about-formula">
-          <span className="sc-icon-tile">
-            <Wallet size={23} />
-          </span>
           <h2>{t('howItWorks')}</h2>
           <strong>{t('formula')}</strong>
           <p>{t('formulaExplanation')}</p>
           <p>{t('timeValueExplanation')}</p>
         </div>
         <div className="sc-surface">
-          <span className="sc-icon-tile">
-            <ShieldCheck size={23} />
-          </span>
           <h2>{t('privacy')}</h2>
           <p>{t('privacyDescription')}</p>
         </div>
@@ -2860,7 +3409,6 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         <h2>{t('dataSources')}</h2>
         {(['exampleSource', 'atSource', 'parkingSource', 'googleSource'] as const).map((key) => (
           <div className="sc-source-row" key={key}>
-            <span className="sc-source-dot" />
             <div>
               <h3>{t(key)}</h3>
               <p>{t(`${key}Description` as MessageKey)}</p>
@@ -2920,24 +3468,22 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             setScreen('planner');
           }}
         >
-          <span className="sc-brand-symbol">
-            <Route size={26} />
+          <span className="sc-brand-symbol" aria-hidden="true">
+            <Route size={18} />
           </span>
-          <span>
+          <span className="sc-brand-text">
             <strong>
               {t('appName')}
               <span className="sc-brand-nz">NZ</span>
             </strong>
-            <small>{t('appTagline')}</small>
+            <small>{t('region')}</small>
           </span>
         </a>
-        <div className="sc-header-region">
-          <MapPin size={14} />
-          {t('region')}
-        </div>
         <div className="sc-header-actions">
-          <span className="sc-status-dot" />
-          <span className="sc-header-status">{t(googleMode ? 'googleOnline' : 'manualMode')}</span>
+          <span className="sc-header-status">
+            <span className="sc-status-dot" aria-hidden="true" />
+            {t(googleMode ? 'googleOnline' : 'manualMode')}
+          </span>
           <select
             aria-label={t('language')}
             value={locale}
@@ -2951,7 +3497,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             aria-label={t(theme === 'light' ? 'dark' : 'light')}
             onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
           >
-            {theme === 'light' ? <Moon size={17} /> : <Sun size={17} />}
+            {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
           </button>
         </div>
       </header>
@@ -3034,67 +3580,44 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           </section>
         )}
         {screen === 'planner' && (
-          <>
-            <section className="sc-planner-intro">
-              <div>
-                <span className="sc-eyebrow">
-                  <span />
-                  {t('region')}
-                </span>
+          <div className="sc-workspace">
+            <div className="sc-plan-column">
+              <section className="sc-planner-intro">
                 <h1>{t('headline')}</h1>
                 <p>{t('subheadline')}</p>
-              </div>
-              {!googleMode && (
-                <span className="sc-intro-note">
-                  <Leaf size={20} />
-                  {t('offlineStatus')}
-                </span>
-              )}
-            </section>
-            {!googleMode && (
-              <div className="sc-demo-banner">
-                <Info size={17} />
-                <p>{t('demoNotice')}</p>
-                <span className="sc-tag">{t('demoData')}</span>
-              </div>
-            )}
-            <div className="sc-workspace">
+                {!googleMode && (
+                  <div className="sc-demo-banner">
+                    <span className="sc-tag">{t('demoData')}</span>
+                    <p>{t('demoNotice')}</p>
+                  </div>
+                )}
+              </section>
               {renderInputs()}
-              {renderSchematic()}
               {renderResults()}
+              {renderGoogleAttribution()}
+              {selected && !summaryInView && (
+                <div className="sc-selected-bar">
+                  <span className="sc-selected-bar-text">
+                    <span>{nameOf(selected)}</span>
+                    <strong>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</strong>
+                    <span>
+                      {tripScope} · {t('minutes', { count: shortNumber(selected.totalMinutes) })}
+                    </span>
+                  </span>
+                  <button className="sc-small-button" onClick={showResults}>
+                    {t('viewOptions')}
+                  </button>
+                </div>
+              )}
             </div>
-          </>
+            {renderSchematic()}
+          </div>
         )}
         {screen === 'comparison' && renderComparison()}
         {screen === 'breakdown' && renderBreakdown()}
         {screen === 'settings' && renderSettings()}
         {screen === 'about' && renderAbout()}
-        {googleResponse && (
-          <section className="sc-google-attribution" aria-label={t('googleDetails')}>
-            <strong>{googleResponse.attribution}</strong>
-            <span>{t('googleDetails')}</span>
-            {googleResponse.attributionLinks?.map((link) =>
-              link.url ? (
-                <a
-                  key={`${link.label}-${link.url}`}
-                  href={link.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {link.label}
-                </a>
-              ) : (
-                <span key={link.label}>{link.label}</span>
-              ),
-            )}
-            {googleResponse.warnings.map((warning) => (
-              <p key={warning}>
-                <Info size={14} />
-                {warning}
-              </p>
-            ))}
-          </section>
-        )}
+        {screen !== 'planner' && renderGoogleAttribution()}
         {screen === 'about' && (
           <section className="sc-page-content sc-registry">
             <div className="sc-surface">
@@ -3121,10 +3644,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         )}
       </main>
       <footer className="sc-footer">
-        <span>
-          <Leaf size={13} />
-          {t('footer')}
-        </span>
+        <span>{t('footer')}</span>
         <span>{t(googleMode ? 'googleDetails' : 'offlineStatus')}</span>
       </footer>
       {notice && (

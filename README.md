@@ -100,7 +100,12 @@ journey is NZ$3.00–7.90; uncertain or separate transfers can widen it, and Cit
 uses its own tariff. Actual stop counts, lines and boarding/alighting stops are
 displayed without treating stop counts as fare zones. Enter a confirmed whole-journey
 fare or apply verified AT zones to replace the range; clearing the fare restores it.
-Cost rankings use the upper end and disclose that assumption. Concessions and fare-cap
+Cost rankings use the upper end and disclose that assumption.
+When the destination is chosen from Google address search, the planner looks up that place's
+opening hours once per session and shows whether it is open at the expected arrival time
+(departure plus the selected route's outbound duration). Opening hours are a Place Details
+Enterprise field, so each new destination costs one Enterprise request; typed and map-picked
+destinations are not looked up. Concessions and fare-cap
 history are excluded from automatic ranges.
 Never enable
 billing or purchase a service without the account owner's consent. No paid service
@@ -241,6 +246,10 @@ With a configured key, online startup loads Google Maps and address search. Addr
 search and route planning send entered locations to Google; after the first route
 query, changing locations or schedules refreshes it automatically. Google
 route content is transient and not saved into the offline shell or user preferences.
+Weather comes from the free [Open-Meteo](https://open-meteo.com/) forecast API (CC BY 4.0,
+non-commercial terms): each request sends the starting point rounded to about 1 km, or the
+Auckland city centre when no coordinates are known, and responses stay in memory for about
+ten minutes. Weather is a commute reference only and never changes costs or rankings.
 The page has no analytics, authentication, server database or LLM calls.
 
 Code is [MIT](LICENSE). Dependency licenses are recorded in

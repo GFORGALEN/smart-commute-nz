@@ -1,0 +1,28 @@
+# Render Blueprint: the planner as a static site built from this branch.
+# The Google browser key is entered in the Render dashboard (sync: false) and never committed.
+# Add the Render URL to the key's HTTP referrer restrictions, or the online map is refused.
+services:
+  - type: web
+    name: smart-commute-nz
+    runtime: static
+    branch: feature/planner-ui-refresh
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: NODE_VERSION
+        value: 24.15.0
+      - key: VITE_BASE_PATH
+        value: /
+      - key: VITE_GOOGLE_MAPS_API_KEY
+        sync: false
+    headers:
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      # The service worker must be revalidated so a new deploy replaces the offline shell.
+      - path: /sw.js
+        name: Cache-Control
+        value: no-cache

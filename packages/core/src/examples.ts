@@ -8,6 +8,9 @@ function manualLeg(
   return { mode, durationMinutes, source: 'manual', estimated: true, ...extras };
 }
 
+/** Stored label of the sample interchange; interfaces may show a translated equivalent. */
+export const EXAMPLE_INTERCHANGE_LABEL = 'User-selected interchange (example assumption)';
+
 /**
  * Offline assumptions for 4 Fong Road → Britomart, Auckland. These are editable
  * demonstration inputs, not verified routes, live fares, or a parking permission check.
@@ -47,7 +50,7 @@ export function createExampleOptions(): JourneyOption[] {
       ],
       parkingCost: 0,
       parkingVerified: false,
-      waypoints: [{ label: 'User-selected interchange (example assumption)' }],
+      waypoints: [{ label: EXAMPLE_INTERCHANGE_LABEL }],
     },
     {
       id: 'transit',

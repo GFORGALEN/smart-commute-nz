@@ -143,6 +143,33 @@ export const DATA_SOURCES: readonly DataSource[] = [
     redistribution: 'unverified',
     limitations: ['No parking-price dataset was selected or represented as integrated.'],
   },
+  {
+    id: 'open-meteo',
+    name: 'Open-Meteo Forecast API',
+    url: 'https://open-meteo.com/en/docs',
+    service: 'GET /v1/forecast (free, no key)',
+    fields: [
+      'temperature_2m',
+      'weather_code',
+      'is_day',
+      'wind_speed_10m',
+      'precipitation_probability',
+      'snowfall',
+    ],
+    status: 'integrated',
+    verifiedOn: '2026-10-11',
+    sourceUpdatedOn: null,
+    updateFrequency: 'Model runs several times a day; current values use 15-minute model data',
+    license: 'CC BY 4.0 (attribution required)',
+    authentication: 'None for the free non-commercial endpoint',
+    commercialUse: 'subject-to-terms',
+    redistribution: 'restricted',
+    limitations: [
+      'Free tier is for non-commercial use, under 10,000 calls a day.',
+      'Rain chance applies to the hour ending at each forecast time.',
+      'Weather is a commute reference and does not change costs or rankings.',
+    ],
+  },
 ];
 
 export function sourceAgeDays(source: DataSource, now = new Date()): number {

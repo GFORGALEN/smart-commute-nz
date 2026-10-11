@@ -852,11 +852,126 @@ describe('Google adapter without external paid requests', () => {
     const result = await provider.getRoutes(request);
     provider.renderRoute(result.routes[0]!.id);
     expect(createPolylines).toHaveBeenCalledWith({
-      polylineOptions: { strokeColor: '#166a5b', strokeWeight: 5 },
+      polylineOptions: { strokeColor: '#2b8b5f', strokeWeight: 6, strokeOpacity: 1 },
     });
     expect(setMap.mock.calls[0]?.[0]).toBeInstanceOf(TestMap);
     provider.dispose();
     expect(setMap).toHaveBeenLastCalledWith(null);
+  });
+  it('draws every alternative, emphasises the selection and reports clicks on alternatives', async () => {
+    const polylineFor = () => {
+      const listeners: Record<string, () => void> = {};
+      return {
+        setMap: vi.fn(),
+        setOptions: vi.fn(),
+        addListener: vi.fn((name: string, callback: () => void) => {
+          listeners[name] = callback;
+          return { remove: vi.fn() };
+        }),
+        listeners,
+      };
+    };
+    const first = polylineFor();
+    const second = polylineFor();
+    const createFirst = vi.fn().mockReturnValue([first]);
+    const createSecond = vi.fn().mockReturnValue([second]);
+    class TestMap {
+      fitBounds = vi.fn();
+      addListener = vi.fn((_name: string, callback: () => void) => {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      });
+    }
+    const loadLibrary = vi.fn().mockImplementation(async (name: string) =>
+      name === 'maps'
+        ? { Map: TestMap }
+        : {
+            Route: {
+              computeRoutes: async () => ({
+                routes: [
+                  { ...drive(1000), createPolylines: createFirst },
+                  { ...drive(2000), createPolylines: createSecond },
+                ],
+              }),
+            },
+          },
+    );
+    const provider = new GoogleRouteProvider({ apiKey: 'test-key', loadLibrary });
+    await provider.initializeMap(document.createElement('div'));
+    const result = await provider.getRoutes(request);
+    const onSelect = vi.fn();
+    provider.renderRoute(result.routes[0]!.id, { onSelect });
+    expect(createFirst).toHaveBeenCalledWith({
+      polylineOptions: { strokeColor: '#2b8b5f', strokeWeight: 6, strokeOpacity: 1 },
+    });
+    expect(createFirst).toHaveBeenCalledWith({
+      polylineOptions: { strokeColor: '#1b5e3f', strokeWeight: 10, strokeOpacity: 1 },
+    });
+    expect(createSecond).toHaveBeenCalledWith({
+      polylineOptions: { strokeColor: '#5e9c7c', strokeWeight: 8, strokeOpacity: 1 },
+    });
+    expect(createSecond).toHaveBeenCalledWith({
+      polylineOptions: { strokeColor: '#d6e8dc', strokeWeight: 4, strokeOpacity: 1 },
+    });
+    // Alternative casing and fill stay below the selected casing and fill.
+    expect(second.setOptions.mock.calls.map(([options]) => options.zIndex)).toEqual([1, 2]);
+    expect(first.setOptions.mock.calls.map(([options]) => options.zIndex)).toEqual([3, 4]);
+    // Only alternatives take clicks; the selected route lets map clicks through.
+    expect(first.setOptions.mock.calls.every(([options]) => options.clickable === false)).toBe(
+      true,
+    );
+    expect(second.setOptions.mock.calls.every(([options]) => options.clickable === true)).toBe(
+      true,
+    );
+    expect(first.addListener).not.toHaveBeenCalled();
+    second.listeners.click!();
+    expect(onSelect).toHaveBeenCalledWith(result.routes[1]!.id);
+    provider.clearMapRoutes();
+    expect(first.setMap).toHaveBeenLastCalledWith(null);
+    expect(second.setMap).toHaveBeenLastCalledWith(null);
+    provider.dispose();
+  });
+  it('redraws walking steps as palette dots without a casing underneath', async () => {
+    const walking = () => ({
+      setMap: vi.fn(),
+      setOptions: vi.fn(),
+      addListener: vi.fn(() => ({ remove: vi.fn() })),
+      get: vi.fn((key: string) => (key === 'icons' ? [{ icon: {} }] : undefined)),
+    });
+    const casingLine = walking();
+    const fillLine = walking();
+    const createPolylines = vi
+      .fn()
+      .mockReturnValueOnce([casingLine])
+      .mockReturnValueOnce([fillLine]);
+    class TestMap {
+      fitBounds = vi.fn();
+      addListener = vi.fn((_name: string, callback: () => void) => {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      });
+    }
+    const loadLibrary = vi.fn().mockImplementation(async (name: string) =>
+      name === 'maps'
+        ? { Map: TestMap }
+        : {
+            Route: {
+              computeRoutes: async () => ({ routes: [{ ...drive(1000), createPolylines }] }),
+            },
+          },
+    );
+    const provider = new GoogleRouteProvider({ apiKey: 'test-key', loadLibrary });
+    await provider.initializeMap(document.createElement('div'));
+    const result = await provider.getRoutes(request);
+    provider.renderRoute(result.routes[0]!.id);
+    expect(casingLine.setOptions).toHaveBeenLastCalledWith({ icons: [], strokeOpacity: 0 });
+    const fillOptions = fillLine.setOptions.mock.lastCall![0] as google.maps.PolylineOptions;
+    expect(fillOptions.strokeOpacity).toBe(0);
+    expect(fillOptions.icons?.[0]?.icon).toMatchObject({
+      fillColor: '#2b8b5f',
+      strokeColor: '#ffffff',
+    });
+    provider.dispose();
   });
   it('accepts exactly one deliberate map stop and detaches selection listeners on cancellation or disposal', async () => {
     type ClickEvent = {

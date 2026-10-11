@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { SmartCommutePlanner } from '@smart-commute/react';
+import { createWeatherFixture, type WeatherFixtureKind } from '@smart-commute/providers';
 import './styles.css';
 
 const parameters = new URLSearchParams(window.location.search);
@@ -44,6 +45,23 @@ function savedDestination(): string | undefined {
   return undefined;
 }
 
+// Development only: ?weatherDemo=rain previews a labelled demo forecast. Production uses live data.
+const demoKinds: WeatherFixtureKind[] = [
+  'clear-day',
+  'clear-night',
+  'cloudy',
+  'rain',
+  'snow',
+  'storm',
+  'fog',
+  'unknown',
+];
+const demoKind = parameters.get('weatherDemo') as WeatherFixtureKind | null;
+const weatherFixture =
+  import.meta.env.DEV && demoKind && demoKinds.includes(demoKind)
+    ? createWeatherFixture(demoKind)
+    : undefined;
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <SmartCommutePlanner
@@ -64,6 +82,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           : appearance.theme || 'light'
       }
       googleApiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY || undefined}
+      weatherFixture={weatherFixture}
     />
   </React.StrictMode>,
 );

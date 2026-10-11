@@ -1,4 +1,5 @@
 import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
+import type { PlaceHours } from './opening-hours';
 import type { JourneyOption, Location, TransitFareRange, TravelLeg } from '@smart-commute/core';
 import type { ProviderMetrics, RouteProvider, RouteRequest, RouteResult } from './types';
 import { RouteProviderError } from './types';
@@ -73,6 +74,16 @@ export interface GoogleAutocompleteOptions {
   initialValue?: string;
   onInput?: (value: string) => void;
   label?: string;
+}
+
+/** How every alternative route is drawn; the selected one is emphasised and drawn on top. */
+export interface RouteRenderOptions {
+  /** Short text per route id, shown as a chip on the map (for example "26 min · $7.76"). */
+  labels?: Record<string, string>;
+  /** Called when a person clicks an alternative route or its chip. */
+  onSelect?: (id: string) => void;
+  /** Text beside the start and end marks, for example "Start · 4 Fong Road". */
+  endpoints?: { start: string; end: string };
 }
 
 /** Callable cleanup retains compatibility with integrations that only dispose it. */
@@ -361,6 +372,89 @@ function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): Transit
 }
 
 /** Maps and route responses are kept only in memory for the active planning session. */
+/** Matches the planner's accent so the selected option and its map line read as one route. */
+// Each route is a casing plus a fill, like a directions map: the selected route is the solid
+// palette green with a deep outline; alternatives are a pale fill inside a lighter green outline.
+const ROUTE_STYLE = {
+  selected: {
+    casing: { strokeColor: '#1b5e3f', strokeWeight: 10, strokeOpacity: 1 },
+    fill: { strokeColor: '#2b8b5f', strokeWeight: 6, strokeOpacity: 1 },
+  },
+  alternative: {
+    casing: { strokeColor: '#5e9c7c', strokeWeight: 8, strokeOpacity: 1 },
+    fill: { strokeColor: '#d6e8dc', strokeWeight: 4, strokeOpacity: 1 },
+  },
+} as const;
+
+type LatLngPoint = { lat: number; lng: number };
+
+/** Google draws walking steps as dotted icon lines; detect them so they take the route colours. */
+const isWalkingLine = (polyline: google.maps.Polyline) => {
+  const icons = polyline.get?.('icons') as unknown;
+  return Array.isArray(icons) && icons.length > 0;
+};
+const walkingDots = (selected: boolean): google.maps.IconSequence[] => [
+  {
+    icon: {
+      // SymbolPath.CIRCLE is 0; the constant is only defined once the SDK has loaded.
+      path: typeof google === 'undefined' ? 0 : google.maps.SymbolPath.CIRCLE,
+      scale: selected ? 3 : 2.4,
+      fillColor: selected ? '#2b8b5f' : '#5e9c7c',
+      fillOpacity: 1,
+      strokeColor: '#ffffff',
+      strokeWeight: 1.5,
+    },
+    offset: '0',
+    repeat: selected ? '11px' : '10px',
+  },
+];
+const pointsOf = (polylines: google.maps.Polyline[]): LatLngPoint[] =>
+  polylines.flatMap(
+    (polyline) =>
+      polyline
+        .getPath?.()
+        ?.getArray()
+        .map((point) => point.toJSON()) ?? [],
+  );
+/** Picks the point of a route farthest from the other routes, so overlapping chips separate. */
+function labelPoint(path: LatLngPoint[], others: LatLngPoint[][]): LatLngPoint | undefined {
+  if (!path.length) return undefined;
+  const step = Math.max(1, Math.floor(path.length / 40));
+  const otherPoints = others.flat().filter((_, index) => index % step === 0);
+  let best = path[Math.floor(path.length / 2)]!;
+  if (!otherPoints.length) return best;
+  let bestDistance = -1;
+  // Skip both ends, where every alternative starts and finishes together.
+  for (let index = Math.floor(path.length * 0.15); index < path.length * 0.85; index += step) {
+    const point = path[index]!;
+    let nearest = Infinity;
+    for (const other of otherPoints) {
+      const distance = (point.lat - other.lat) ** 2 + (point.lng - other.lng) ** 2;
+      if (distance < nearest) nearest = distance;
+    }
+    if (nearest > bestDistance) {
+      bestDistance = nearest;
+      best = point;
+    }
+  }
+  return best;
+}
+// Tinted to the planner palette: off-white land, sage parks, soft blue water, ochre highways.
+const COMMUTE_MAP_STYLE: google.maps.MapTypeStyle[] = [
+  { featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+  { featureType: 'poi.business', stylers: [{ visibility: 'off' }] },
+  { featureType: 'landscape', elementType: 'geometry', stylers: [{ color: '#eef0ea' }] },
+  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: '#d8e2d6' }] },
+  {
+    featureType: 'landscape.natural',
+    elementType: 'labels.icon',
+    stylers: [{ visibility: 'off' }],
+  },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#c6d9e3' }] },
+  { featureType: 'road.highway', elementType: 'geometry.fill', stylers: [{ color: '#f0e3c4' }] },
+  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#d6bf8a' }] },
+];
+
 export class GoogleRouteProvider implements RouteProvider {
   readonly id = 'google';
   private readonly options: GoogleRouteProviderOptions;
@@ -372,7 +466,13 @@ export class GoogleRouteProvider implements RouteProvider {
   private overlayViewConstructor?: typeof google.maps.OverlayView;
   private waypointMarkers: google.maps.OverlayView[] = [];
   private polylines: google.maps.Polyline[] = [];
+  /** Alternatives that select a route on click; muted while a map point is being picked. */
+  private clickableRoutes: google.maps.Polyline[] = [];
+  private routeChips: google.maps.OverlayView[] = [];
+  private routeListeners: google.maps.MapsEventListener[] = [];
+  private fittedRouteSet = '';
   private sdkRoutes = new Map<string, GoogleRouteData>();
+  private placeHours = new Map<string, Promise<PlaceHours>>();
   private computationWarnings: string[] = [];
   private metrics: ProviderMetrics = {
     routeRequests: 0,
@@ -477,6 +577,9 @@ export class GoogleRouteProvider implements RouteProvider {
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: true,
+        // Commuting needs roads, route shields and transit; businesses and landmarks are noise.
+        clickableIcons: false,
+        styles: COMMUTE_MAP_STYLE,
       });
       if (failed) await failure;
       this.map = map;
@@ -536,7 +639,11 @@ export class GoogleRouteProvider implements RouteProvider {
           if (active && selectedRevision === revision) {
             const label = place.formattedAddress ?? widget.value;
             widget.value = label;
-            onSelect({ label, coordinates: place.location.toJSON() });
+            onSelect({
+              label,
+              coordinates: place.location.toJSON(),
+              ...(place.id ? { placeId: place.id } : {}),
+            });
           }
         } catch (error) {
           if (active && selectedRevision === revision) onError?.(readableError(error));
@@ -586,9 +693,63 @@ export class GoogleRouteProvider implements RouteProvider {
     }
   }
 
+  /**
+   * Opening hours for one selected place. These fields bill as Place Details Enterprise, so each
+   * place is requested at most once per session and only when the planner asks for it.
+   */
+  getPlaceHours(placeId: string): Promise<PlaceHours> {
+    const cached = this.placeHours.get(placeId);
+    if (cached) return cached;
+    const request = (async (): Promise<PlaceHours> => {
+      try {
+        const places = (await this.load('places')) as google.maps.PlacesLibrary;
+        const place = new places.Place({ id: placeId });
+        this.metrics.placeDetailsRequests += 1;
+        await place.fetchFields({
+          fields: ['businessStatus', 'regularOpeningHours', 'utcOffsetMinutes'],
+        });
+        const status = place.businessStatus;
+        return {
+          placeId,
+          ...(status === 'OPERATIONAL' ||
+          status === 'CLOSED_TEMPORARILY' ||
+          status === 'CLOSED_PERMANENTLY'
+            ? { businessStatus: status }
+            : {}),
+          periods: (place.regularOpeningHours?.periods ?? []).map((period) => ({
+            open: { day: period.open.day, hour: period.open.hour, minute: period.open.minute },
+            ...(period.close
+              ? {
+                  close: {
+                    day: period.close.day,
+                    hour: period.close.hour,
+                    minute: period.close.minute,
+                  },
+                }
+              : {}),
+          })),
+          ...(typeof place.utcOffsetMinutes === 'number'
+            ? { utcOffsetMinutes: place.utcOffsetMinutes }
+            : {}),
+          fetchedAt: Date.now(),
+        };
+      } catch (error) {
+        this.placeHours.delete(placeId);
+        throw readableError(error);
+      }
+    })();
+    this.placeHours.set(placeId, request);
+    return request;
+  }
+
   clearMapRoutes(): void {
+    for (const listener of this.routeListeners) listener.remove();
     for (const polyline of this.polylines) polyline.setMap(null);
+    for (const chip of this.routeChips) chip.setMap(null);
+    this.routeListeners = [];
     this.polylines = [];
+    this.clickableRoutes = [];
+    this.routeChips = [];
   }
 
   /** One deliberate map click adds a coordinate without a reverse-geocoding request. */
@@ -597,11 +758,14 @@ export class GoogleRouteProvider implements RouteProvider {
     const map = this.map;
     if (!map) throw new RouteProviderError('INVALID_INPUT', 'Load the map before choosing a stop.');
     let active = true;
+    // While picking, route lines must not swallow the click meant for the map.
+    for (const polyline of this.clickableRoutes) polyline.setOptions?.({ clickable: false });
     const cleanup = () => {
       if (!active) return;
       active = false;
       listener.remove();
       map.setOptions({ draggableCursor: null });
+      for (const polyline of this.clickableRoutes) polyline.setOptions?.({ clickable: true });
       if (this.waypointSelectionCleanup === cleanup) this.waypointSelectionCleanup = undefined;
     };
     map.setOptions({ draggableCursor: 'crosshair' });
@@ -645,7 +809,7 @@ export class GoogleRouteProvider implements RouteProvider {
         placeItems: 'center',
         borderRadius: '50%',
         border: '2px solid white',
-        background: '#166a5b',
+        background: '#23784f',
         color: 'white',
         font: 'bold 13px system-ui, sans-serif',
         boxShadow: '0 2px 5px #0006',
@@ -664,24 +828,211 @@ export class GoogleRouteProvider implements RouteProvider {
     });
   }
 
-  renderRoute(id: string): void {
+  /**
+   * Draws every alternative from the last response, like a directions map: alternatives in a
+   * muted line, the selected route in the accent colour on top. The view is fitted only when the
+   * set of routes changes, so choosing an alternative does not move the map.
+   */
+  renderRoute(id: string, options: RouteRenderOptions = {}): void {
     this.clearMapRoutes();
-    const route = this.sdkRoutes.get(id);
-    if (!this.map || !route) return;
-    this.polylines =
-      route.createPolylines?.({ polylineOptions: { strokeColor: '#166a5b', strokeWeight: 5 } }) ??
-      [];
-    for (const polyline of this.polylines) polyline.setMap(this.map);
-    if (route.viewport) {
-      const map = this.map;
-      const listener = map.addListener('idle', () => {
-        listener.remove();
-        if (this.map !== map) return;
-        const zoom = map.getZoom?.();
-        if (zoom !== undefined && zoom > 15) map.setZoom?.(15);
-      });
-      map.fitBounds(route.viewport, { top: 48, right: 48, bottom: 48, left: 48 });
+    const map = this.map;
+    if (!map || !this.sdkRoutes.has(id)) return;
+    const ordered = [...this.sdkRoutes.entries()].sort(([left], [right]) =>
+      left === id ? 1 : right === id ? -1 : 0,
+    );
+    const drawn = ordered.map(([routeId, route]) => {
+      const selected = routeId === id;
+      const style = selected ? ROUTE_STYLE.selected : ROUTE_STYLE.alternative;
+      // Casing first, fill on top; selected layers sit above every alternative.
+      const casing = route.createPolylines?.({ polylineOptions: { ...style.casing } }) ?? [];
+      const fill = route.createPolylines?.({ polylineOptions: { ...style.fill } }) ?? [];
+      const layers = [
+        ...casing.map((polyline) => [polyline, selected ? 3 : 1] as const),
+        ...fill.map((polyline) => [polyline, selected ? 4 : 2] as const),
+      ];
+      for (const [polyline, zIndex] of layers) {
+        // The selected route never takes clicks, so a map click on it reaches the map.
+        const clickable = !selected && Boolean(options.onSelect) && !this.waypointSelectionCleanup;
+        polyline.setOptions?.({ zIndex, clickable });
+        // Walking steps: one row of palette dots, no casing underneath.
+        if (isWalkingLine(polyline))
+          polyline.setOptions?.(
+            casing.includes(polyline)
+              ? { icons: [], strokeOpacity: 0 }
+              : { icons: walkingDots(selected), strokeOpacity: 0 },
+          );
+        if (!selected && options.onSelect) this.clickableRoutes.push(polyline);
+        polyline.setMap(map);
+        if (!selected && options.onSelect) {
+          const listener = polyline.addListener?.('click', () => options.onSelect?.(routeId));
+          if (listener) this.routeListeners.push(listener);
+        }
+      }
+      this.polylines.push(...casing, ...fill);
+      return { routeId, selected, path: pointsOf(fill) };
+    });
+    const OverlayView = this.overlayViewConstructor;
+    if (OverlayView && options.labels) {
+      for (const route of drawn) {
+        const text = options.labels[route.routeId];
+        const point = text
+          ? labelPoint(
+              route.path,
+              drawn.filter((other) => other !== route).map((other) => other.path),
+            )
+          : undefined;
+        if (!text || !point) continue;
+        this.routeChips.push(this.addRouteChip(OverlayView, map, point, text, route, options));
+      }
     }
+    // Start and end marks echo the form's route dots: hollow circle to filled square.
+    const main = drawn.find((route) => route.selected);
+    if (OverlayView && main?.path.length) {
+      this.routeChips.push(
+        this.addEndpointMarker(OverlayView, map, main.path[0]!, 'start', options.endpoints?.start),
+        this.addEndpointMarker(
+          OverlayView,
+          map,
+          main.path[main.path.length - 1]!,
+          'end',
+          options.endpoints?.end,
+        ),
+      );
+    }
+    const routeSet = [...this.sdkRoutes.keys()].join('|');
+    if (routeSet !== this.fittedRouteSet) {
+      this.fittedRouteSet = routeSet;
+      this.fitRoutes(map);
+    }
+  }
+
+  private addRouteChip(
+    OverlayView: typeof google.maps.OverlayView,
+    map: google.maps.Map,
+    point: LatLngPoint,
+    text: string,
+    route: { routeId: string; selected: boolean },
+    options: RouteRenderOptions,
+  ): google.maps.OverlayView {
+    const chip = new OverlayView();
+    const element = document.createElement('button');
+    element.type = 'button';
+    element.className = `sc-map-route-chip${route.selected ? ' is-selected' : ''}`;
+    element.textContent = text;
+    element.setAttribute('aria-pressed', String(route.selected));
+    Object.assign(element.style, {
+      position: 'absolute',
+      transform: 'translate(-50%, calc(-100% - 8px))',
+      padding: '4px 8px',
+      border: route.selected ? '1px solid #1b5e3f' : '1px solid #5e9c7c',
+      borderRadius: '6px',
+      background: route.selected ? '#23784f' : '#fcfcf9',
+      color: route.selected ? '#ffffff' : '#1e2b24',
+      font: '600 12px/1.3 system-ui, -apple-system, "Segoe UI", sans-serif',
+      fontVariantNumeric: 'tabular-nums',
+      whiteSpace: 'nowrap',
+      boxShadow: '0 1px 4px rgb(0 0 0 / 0.22)',
+      cursor: route.selected ? 'default' : 'pointer',
+      zIndex: route.selected ? '2' : '1',
+    });
+    element.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!route.selected) options.onSelect?.(route.routeId);
+    });
+    OverlayView.preventMapHitsAndGesturesFrom?.(element);
+    chip.onAdd = () => chip.getPanes()?.floatPane.appendChild(element);
+    chip.draw = () => {
+      const position = chip.getProjection()?.fromLatLngToDivPixel(point);
+      if (!position) return;
+      element.style.left = `${position.x}px`;
+      element.style.top = `${position.y}px`;
+    };
+    chip.onRemove = () => element.remove();
+    chip.setMap(map);
+    return chip;
+  }
+
+  private addEndpointMarker(
+    OverlayView: typeof google.maps.OverlayView,
+    map: google.maps.Map,
+    point: LatLngPoint,
+    kind: 'start' | 'end',
+    label?: string,
+  ): google.maps.OverlayView {
+    const marker = new OverlayView();
+    const element = document.createElement('span');
+    element.className = `sc-map-endpoint sc-map-endpoint-${kind}`;
+    element.setAttribute('aria-hidden', 'true');
+    Object.assign(element.style, {
+      position: 'absolute',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '6px',
+      // Anchor on the dot's centre so the label extends to the right of the exact endpoint.
+      transform: `translate(-${kind === 'start' ? 9 : 10}px, -50%)`,
+      pointerEvents: 'none',
+      zIndex: '3',
+    });
+    const dot = document.createElement('span');
+    Object.assign(dot.style, {
+      flex: 'none',
+      boxSizing: 'border-box',
+      width: kind === 'start' ? '18px' : '20px',
+      height: kind === 'start' ? '18px' : '20px',
+      borderRadius: kind === 'start' ? '50%' : '5px',
+      border: kind === 'start' ? '5px solid #1b5e3f' : '3px solid #ffffff',
+      background: kind === 'start' ? '#ffffff' : '#1b5e3f',
+      boxShadow: '0 1px 4px rgb(0 0 0 / 0.35)',
+    });
+    element.appendChild(dot);
+    if (label) {
+      const text = document.createElement('span');
+      text.textContent = label;
+      Object.assign(text.style, {
+        padding: '3px 8px',
+        borderRadius: '6px',
+        background: kind === 'start' ? '#ffffff' : '#1b5e3f',
+        color: kind === 'start' ? '#1e2b24' : '#ffffff',
+        border: '1px solid #1b5e3f',
+        font: '600 12px/1.3 system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif',
+        whiteSpace: 'nowrap',
+        boxShadow: '0 1px 4px rgb(0 0 0 / 0.22)',
+      });
+      element.appendChild(text);
+    }
+    marker.onAdd = () => marker.getPanes()?.floatPane.appendChild(element);
+    marker.draw = () => {
+      const position = marker.getProjection()?.fromLatLngToDivPixel(point);
+      if (!position) return;
+      element.style.left = `${position.x}px`;
+      element.style.top = `${position.y}px`;
+    };
+    marker.onRemove = () => element.remove();
+    marker.setMap(map);
+    return marker;
+  }
+
+  private fitRoutes(map: google.maps.Map): void {
+    const bounds = [...this.sdkRoutes.values()]
+      .map((route) => route.viewport?.toJSON?.())
+      .filter((viewport): viewport is google.maps.LatLngBoundsLiteral => Boolean(viewport));
+    const first = [...this.sdkRoutes.values()].find((route) => route.viewport)?.viewport;
+    if (!first) return;
+    const union = bounds.length
+      ? bounds.reduce((all, viewport) => ({
+          north: Math.max(all.north, viewport.north),
+          south: Math.min(all.south, viewport.south),
+          east: Math.max(all.east, viewport.east),
+          west: Math.min(all.west, viewport.west),
+        }))
+      : first;
+    const listener = map.addListener('idle', () => {
+      listener.remove();
+      if (this.map !== map) return;
+      const zoom = map.getZoom?.();
+      if (zoom !== undefined && zoom > 15) map.setZoom?.(15);
+    });
+    map.fitBounds(union, { top: 64, right: 48, bottom: 48, left: 48 });
   }
 
   dispose(): void {

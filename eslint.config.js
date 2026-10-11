@@ -11,6 +11,8 @@ export default tseslint.config(
       'dist-widget/**',
       'test-results/**',
       'playwright-report/**',
+      // Vendored agent skills (third-party), not project source.
+      '.claude/**',
     ],
   },
   js.configs.recommended,

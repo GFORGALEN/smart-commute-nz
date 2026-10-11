@@ -10,6 +10,14 @@ async function showInputs(page: Page): Promise<void> {
   if (await toggle.isVisible()) await toggle.click();
 }
 
+async function showRouteDetails(page: Page, editor: string): Promise<void> {
+  await page
+    .getByTestId(editor)
+    .locator('summary')
+    .filter({ hasText: /^Times, tolls and segments$/ })
+    .click();
+}
+
 async function navigate(page: Page, name: string): Promise<void> {
   await page.getByRole('tablist').getByRole('tab', { name, exact: true }).click();
 }
@@ -56,10 +64,6 @@ test('independent public transport fares change the daily price and cheapest cho
   await page.getByRole('button', { name: 'Public transport', exact: true }).click();
   const editor = page.getByTestId('route-editor-transit');
   await editor.getByLabel('Public transport fare — outbound', { exact: true }).fill('1');
-  await editor
-    .locator('summary')
-    .filter({ hasText: /^Return$/ })
-    .click();
   await editor.getByLabel('Public transport fare — return', { exact: true }).fill('2');
   await expect(page.getByTestId('route-card-transit')).toContainText('3.00');
   await expect(page.getByTestId('route-card-transit')).toContainText('Lowest cost');
@@ -101,10 +105,6 @@ test('verified AT zones apply independent static fares with transparent provenan
   await expect(editor.getByLabel('Public transport fare — outbound', { exact: true })).toHaveValue(
     '4.9',
   );
-  await editor
-    .locator('summary')
-    .filter({ hasText: /^Return$/ })
-    .click();
   await expect(editor.getByLabel('Public transport fare — return', { exact: true })).toHaveValue(
     '6.5',
   );
@@ -117,10 +117,6 @@ test('outbound and return use different distances and parking is charged once', 
   await showInputs(page);
   const editor = page.getByTestId('route-editor-drive');
   await editor.getByLabel('Outbound distance (km)', { exact: true }).fill('10');
-  await editor
-    .locator('summary')
-    .filter({ hasText: /^Return$/ })
-    .click();
   await editor.getByLabel('Return distance (km)', { exact: true }).fill('30');
   await editor.getByLabel('Parking per commute (NZ$)', { exact: true }).fill('12');
   await expect(page.getByTestId('route-card-drive')).toContainText('23.48');
@@ -136,6 +132,7 @@ test('a waypoint is saved as a manual preference without fabricating a new dista
 }) => {
   await openPlanner(page);
   await showInputs(page);
+  await showRouteDetails(page, 'route-editor-drive');
   await page
     .getByPlaceholder('Add a stop, station or via point', { exact: true })
     .fill('Panmure station');
@@ -150,6 +147,7 @@ test('a waypoint is saved as a manual preference without fabricating a new dista
   await expect(page.getByTestId('route-card-drive')).toContainText('10.91');
   await page.reload();
   await showInputs(page);
+  await showRouteDetails(page, 'route-editor-drive');
   await expect(page.getByText('Panmure station', { exact: true })).toBeVisible();
 });
 

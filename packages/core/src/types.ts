@@ -5,6 +5,8 @@ export type DataSource = 'manual' | 'google' | 'at-rule';
 export interface Location {
   label: string;
   coordinates?: { lat: number; lng: number };
+  /** Google place id when chosen from address search; session-only, never persisted. */
+  placeId?: string;
 }
 
 export interface CostRange {
