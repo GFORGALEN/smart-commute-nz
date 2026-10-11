@@ -656,6 +656,26 @@ describe('optional Google provider safeguards', () => {
     expect(screen.getByRole('status')).toHaveTextContent('session-only');
   });
 
+  it('replaces saved times that have already passed before a traffic-aware request', async () => {
+    const past = localDateTime(new Date(Date.now() - 60 * 60 * 1000).toISOString());
+    localStorage.setItem(
+      'smart-commute-nz:v1',
+      JSON.stringify({
+        origin: { label: '4 Fong Road, Auckland' },
+        destination: { label: defaultProps.destination },
+        settings: DEFAULT_SETTINGS,
+        options: createExampleOptions(),
+        leaveNow: false,
+        departure: past,
+        returnTime: past,
+      }),
+    );
+    await renderGooglePlanner();
+    expect(screen.getByLabelText('Leave now', { exact: true })).toBeChecked();
+    const returnTime = screen.getByLabelText('Return time', { exact: true }) as HTMLInputElement;
+    expect(new Date(returnTime.value).getTime()).toBeGreaterThan(Date.now());
+  });
+
   it('sends an explicit transit lookup with no driving waypoints', async () => {
     google.getRoutes.mockRejectedValueOnce(new Error('No complete NZD fare was returned.'));
     await renderGooglePlanner();

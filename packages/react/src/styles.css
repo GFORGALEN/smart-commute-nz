@@ -627,7 +627,7 @@ h3.sc-section-label {
   border: 1px solid var(--sc-line-strong);
   border-radius: var(--sc-radius-sm);
   background: var(--sc-surface);
-  overflow: hidden;
+  /* No overflow clipping: Google's suggestion list drops out of this box. */
 }
 .sc-live-address > div:focus-within {
   border-color: var(--sc-focus);
@@ -642,6 +642,7 @@ h3.sc-section-label {
   width: 100%;
   min-width: 0;
   border: 0;
+  border-radius: inherit;
   background: transparent;
   color-scheme: light;
 }

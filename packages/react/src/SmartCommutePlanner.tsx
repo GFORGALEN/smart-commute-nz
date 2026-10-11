@@ -166,6 +166,11 @@ const defaultReturnTime = () => {
   const pad = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
+/** Saved local times expire: traffic-aware driving rejects any departure in the past. */
+const isFutureTime = (value: string | undefined) => {
+  const time = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(time) && time > Date.now();
+};
 
 function initialState(props: SmartCommutePlannerProps): PlannerState {
   const fallback: PlannerState = {
@@ -222,7 +227,10 @@ function initialState(props: SmartCommutePlannerProps): PlannerState {
             }
           })
         : [],
-      returnTime: saved.returnTime || fallback.returnTime,
+      ...(saved.leaveNow === false && !isFutureTime(saved.departure)
+        ? { leaveNow: true, departure: '' }
+        : {}),
+      returnTime: isFutureTime(saved.returnTime) ? saved.returnTime! : fallback.returnTime,
     };
   } catch {
     return fallback;
