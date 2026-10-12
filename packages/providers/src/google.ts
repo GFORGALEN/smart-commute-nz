@@ -86,6 +86,13 @@ export interface RouteRenderOptions {
   onSelect?: (id: string) => void;
   /** Text beside the start and end marks, for example "Start · 4 Fong Road". */
   endpoints?: { start: string; end: string };
+  /** Space kept clear around the routes when they are first framed, for overlaid controls. */
+  padding?: google.maps.Padding;
+}
+
+export interface MapDisplayOptions {
+  /** Phones overlay their own controls on the map, so the fullscreen button is left off. */
+  fullscreenControl?: boolean;
 }
 
 /** Callable cleanup retains compatibility with integrations that only dispose it. */
@@ -519,6 +526,7 @@ export class GoogleRouteProvider implements RouteProvider {
   async initializeMap(
     element: HTMLElement,
     onError?: (error: RouteProviderError) => void,
+    display: MapDisplayOptions = {},
   ): Promise<void> {
     this.waypointSelectionCleanup?.();
     this.clearWaypointMarkers();
@@ -578,7 +586,7 @@ export class GoogleRouteProvider implements RouteProvider {
         maxZoom: 15,
         mapTypeControl: false,
         streetViewControl: false,
-        fullscreenControl: true,
+        fullscreenControl: display.fullscreenControl ?? true,
         // Commuting needs roads, route shields and transit; businesses and landmarks are noise.
         clickableIcons: false,
         styles: COMMUTE_MAP_STYLE,
@@ -904,7 +912,7 @@ export class GoogleRouteProvider implements RouteProvider {
     const routeSet = [...this.sdkRoutes.keys()].join('|');
     if (routeSet !== this.fittedRouteSet) {
       this.fittedRouteSet = routeSet;
-      this.fitRoutes(map);
+      this.fitRoutes(map, options.padding);
     }
   }
 
@@ -1014,7 +1022,7 @@ export class GoogleRouteProvider implements RouteProvider {
     return marker;
   }
 
-  private fitRoutes(map: google.maps.Map): void {
+  private fitRoutes(map: google.maps.Map, padding?: google.maps.Padding): void {
     const bounds = [...this.sdkRoutes.values()]
       .map((route) => route.viewport?.toJSON?.())
       .filter((viewport): viewport is google.maps.LatLngBoundsLiteral => Boolean(viewport));
@@ -1034,7 +1042,7 @@ export class GoogleRouteProvider implements RouteProvider {
       const zoom = map.getZoom?.();
       if (zoom !== undefined && zoom > 15) map.setZoom?.(15);
     });
-    map.fitBounds(union, { top: 64, right: 48, bottom: 48, left: 48 });
+    map.fitBounds(union, padding ?? { top: 64, right: 48, bottom: 48, left: 48 });
   }
 
   dispose(): void {

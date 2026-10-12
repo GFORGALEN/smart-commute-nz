@@ -1667,3 +1667,141 @@ describe('traffic delay cost', () => {
     expect(screen.getByTestId('cost-google-traffic')).toHaveTextContent('4.37');
   });
 });
+
+describe('phone map-first layout', () => {
+  const phoneMedia = (query: string) => ({
+    matches: query.includes('max-width: 899px'),
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  });
+  const routeCard = () => screen.getByRole('button', { name: /^Edit route:/ });
+  const routePage = () => screen.getByRole('dialog', { name: 'Edit route' });
+  const noPageOpen = () =>
+    waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+  beforeEach(() => {
+    window.history.replaceState(null, '');
+    vi.stubGlobal('matchMedia', phoneMedia);
+  });
+
+  it('opens on the map with the selected cost and options instead of the input form', () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Starting point', { exact: true })).not.toBeInTheDocument();
+    expect(routeCard()).toHaveTextContent('4 Fong Road');
+    expect(routeCard()).toHaveTextContent('Britomart');
+    expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.95');
+    expect(screen.getByTestId('cost-transit')).toHaveTextContent('13.00');
+    expect(screen.getByRole('button', { name: 'Hide options' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(screen.getByText(/not a navigable map/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('route-card-transit'));
+    expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.00');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Hide options' }));
+    expect(screen.queryByTestId('route-card-transit')).not.toBeVisible();
+    expect(screen.getByTestId('selected-cost')).toBeVisible();
+  });
+
+  it('discards an unconfirmed route edit on back and keeps a confirmed one', async () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    // A tap focuses the card; focus returns to it when the page closes.
+    routeCard().focus();
+    fireEvent.click(routeCard());
+    expect(window.history.state).toMatchObject({ smartCommuteLayer: 1 });
+    expect(routePage()).toHaveFocus();
+    fireEvent.change(within(routePage()).getByLabelText('Destination', { exact: true }), {
+      target: { value: 'Albany, Auckland' },
+    });
+    fireEvent.click(
+      within(routePage()).getByRole('button', { name: 'Discard changes and go back' }),
+    );
+    await noPageOpen();
+    expect(routeCard()).toHaveTextContent('Britomart');
+    expect(routeCard()).toHaveFocus();
+
+    fireEvent.click(routeCard());
+    fireEvent.change(within(routePage()).getByLabelText('Destination', { exact: true }), {
+      target: { value: 'Albany, Auckland' },
+    });
+    fireEvent.click(within(routePage()).getByRole('button', { name: 'Done' }));
+    await noPageOpen();
+    expect(routeCard()).toHaveTextContent('Albany');
+    expect(window.history.state).toBeNull();
+  });
+
+  it('closes stacked pages one at a time with the system back button', async () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'About & sources' }));
+    expect(screen.getByRole('dialog', { name: 'About & sources' })).toBeInTheDocument();
+    act(() => window.history.back());
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'About & sources' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeInTheDocument();
+    act(() => window.history.back());
+    await noPageOpen();
+  });
+
+  it('recalculates on the cost page and shows the edited total before returning', async () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Adjust fares and costs' }));
+    const page = screen.getByRole('dialog', { name: 'Adjust fares and costs' });
+    changeNumber('Fuel price (NZ$/L)', '5');
+    expect(page).toHaveTextContent('18.62');
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('18.62');
+    fireEvent.click(within(page).getByRole('button', { name: 'Done' }));
+    await noPageOpen();
+    expect(screen.getByTestId('selected-cost')).toHaveTextContent('18.62');
+  });
+
+  it('plans live routes only when the route page is confirmed and restores them on discard', async () => {
+    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    expect(google.initializeMap.mock.calls[0]![2]).toEqual({ fullscreenControl: false });
+    expect(google.attachAutocomplete).not.toHaveBeenCalled();
+
+    fireEvent.click(routeCard());
+    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
+    fireEvent.click(within(routePage()).getByLabelText('Include the return journey'));
+    fireEvent.click(within(routePage()).getByRole('button', { name: 'Public transport' }));
+    fireEvent.click(within(routePage()).getByRole('button', { name: 'Drive' }));
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    fireEvent.click(within(routePage()).getByRole('button', { name: 'Plan route' }));
+    await screen.findByTestId('cost-google-drive-test');
+    await noPageOpen();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    expect(google.getRoutes.mock.calls[0]![0]).toMatchObject({ mode: 'drive', roundTrip: false });
+    expect(google.renderRoute).toHaveBeenLastCalledWith(
+      'google-drive-test',
+      expect.objectContaining({ padding: expect.objectContaining({ top: expect.any(Number) }) }),
+    );
+
+    fireEvent.click(routeCard());
+    const destination = await within(routePage()).findByLabelText('Destination', {
+      exact: true,
+    });
+    fireEvent.input(destination, { target: { value: 'Albany, Auckland' } });
+    await waitFor(() =>
+      expect(screen.queryByTestId('cost-google-drive-test')).not.toBeInTheDocument(),
+    );
+    fireEvent.click(
+      within(routePage()).getByRole('button', { name: 'Discard changes and go back' }),
+    );
+    await noPageOpen();
+    expect(await screen.findByTestId('cost-google-drive-test')).toBeInTheDocument();
+    expect(routeCard()).toHaveTextContent('Britomart');
+    // The debounced refresh must not fire for a restored trip.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+  });
+});

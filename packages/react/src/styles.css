@@ -2491,43 +2491,461 @@ label.sc-route-measurements {
   }
 }
 
-/* Narrow: inputs, options, then the map; larger labels and touch targets. */
-@media (max-width: 899px) {
-  .sc-map-panel {
-    border-top: 1px solid var(--sc-line);
+/*
+ * Phone: one persistent map with a route card above and a cost sheet below. Route editing,
+ * costs and reading pages open as full-screen layers over it, so the map is never rebuilt.
+ */
+.smart-commute.sc-mobile {
+  --sc-float-shadow: 0 2px 10px rgb(30 43 36 / 0.18);
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+.smart-commute.sc-mobile.sc-theme-dark {
+  --sc-float-shadow: 0 2px 10px rgb(0 0 0 / 0.45);
+}
+.sc-mobile-shell {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+.sc-mobile-main {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--sc-surface-2);
+}
+/* The sheet sits below the map rather than over it, so Google's logo and terms stay visible. */
+.sc-mobile-map {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.sc-mobile-map > .sc-map-panel {
+  position: absolute;
+  inset: 0;
+}
+.sc-mobile .sc-map-stage {
+  min-height: 0;
+}
+.sc-mobile .sc-schematic {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: calc(env(safe-area-inset-top) + 92px) 72px var(--sc-space-6) var(--sc-gutter);
+}
+.sc-mobile-top {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + var(--sc-space-3));
+  right: var(--sc-space-3);
+  left: var(--sc-space-3);
+  z-index: 3;
+  display: flex;
+  align-items: stretch;
+  gap: var(--sc-space-2);
+}
+.sc-route-card {
+  display: grid;
+  flex: 1;
+  align-content: center;
+  gap: 2px;
+  min-width: 0;
+  min-height: 56px;
+  padding: var(--sc-space-2) var(--sc-space-4);
+  border: 1px solid var(--sc-line);
+  border-radius: 12px;
+  background: var(--sc-surface);
+  box-shadow: var(--sc-float-shadow);
+  color: var(--sc-text);
+  text-align: left;
+}
+.sc-route-card-places {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--sc-fs-input);
+  line-height: 1.3;
+}
+.sc-route-card-places > span,
+.sc-route-card-places > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-route-card-places > span {
+  flex: 0 1 auto;
+  max-width: 45%;
+  color: var(--sc-text-2);
+}
+.sc-route-card-places > svg {
+  color: var(--sc-muted);
+}
+.sc-route-card-places > strong {
+  font-weight: 650;
+}
+.sc-route-card-meta {
+  overflow: hidden;
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-route-card-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-2);
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-input);
+  font-weight: 600;
+}
+.sc-map-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--sc-line);
+  border-radius: 12px;
+  background: var(--sc-surface);
+  box-shadow: var(--sc-float-shadow);
+  color: var(--sc-text);
+}
+.sc-mobile-top > .sc-map-button {
+  height: auto;
+  min-height: 56px;
+}
+.sc-map-button[aria-expanded='true'] {
+  border-color: var(--sc-accent);
+  color: var(--sc-accent-text);
+}
+.sc-map-fabs {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 80px);
+  right: var(--sc-space-3);
+  z-index: 2;
+  display: grid;
+  gap: var(--sc-space-2);
+}
+.sc-mobile-weather {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 80px);
+  right: calc(var(--sc-space-3) + 56px);
+  left: var(--sc-space-3);
+  z-index: 2;
+  overflow: hidden;
+  border: 1px solid var(--sc-line);
+  border-radius: 12px;
+  box-shadow: var(--sc-float-shadow);
+}
+.sc-mobile-weather .sc-weather {
+  border-bottom: 0;
+}
+.sc-mobile-pick {
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sc-space-2) var(--sc-space-2) var(--sc-space-2) var(--sc-space-4);
+  border-radius: 12px;
+  background: var(--sc-text);
+  box-shadow: var(--sc-float-shadow);
+  color: var(--sc-surface);
+  font-size: var(--sc-fs-label);
+}
+.sc-mobile-pick .sc-small-button {
+  flex: none;
+}
+
+/* Cost sheet: collapsed shows the selected cost; open adds options and next steps. */
+.sc-sheet {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  max-height: 52%;
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid var(--sc-line);
+  border-radius: 16px 16px 0 0;
+  background: var(--sc-surface);
+  box-shadow: var(--sc-shadow-raised);
+}
+.sc-sheet-grip {
+  display: grid;
+  flex: none;
+  place-items: center;
+  height: 22px;
+  cursor: grab;
+  touch-action: none;
+}
+.sc-sheet-grip span {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sc-line-strong);
+}
+.sc-sheet-head {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  gap: var(--sc-space-2);
+  padding: 0 var(--sc-space-2) var(--sc-space-3) var(--sc-gutter);
+}
+.sc-sheet-head:first-child {
+  padding-top: var(--sc-space-4);
+}
+.sc-sheet-head > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.sc-sheet-toggle svg {
+  transition: transform 0.15s ease;
+}
+.sc-sheet-toggle[aria-expanded='false'] svg {
+  transform: rotate(180deg);
+}
+.sc-sheet-selected {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 2px var(--sc-space-3);
+}
+.sc-sheet-name {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
+  font-weight: 600;
+}
+.sc-sheet-name > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-sheet-cost {
+  margin-left: -4px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.sc-sheet-cost.sc-sheet-cost-range {
+  grid-column: 1 / -1;
+  font-size: 20px;
+}
+.sc-sheet-meta {
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
+  font-variant-numeric: tabular-nums;
+}
+.sc-sheet-source {
+  grid-column: 1 / -1;
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+  line-height: 1.4;
+}
+.sc-sheet-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-2);
+  min-height: 44px;
+  color: var(--sc-text-2);
+  font-weight: 550;
+}
+.sc-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2.5px solid var(--sc-line);
+  border-top-color: var(--sc-accent);
+  border-radius: 50%;
+  animation: sc-spin 0.9s linear infinite;
+}
+.sc-sheet-empty {
+  display: grid;
+  gap: var(--sc-space-2);
+}
+.sc-sheet-empty strong {
+  font-size: var(--sc-fs-title);
+  font-weight: 650;
+}
+.sc-sheet-empty p {
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-label);
+}
+.sc-sheet-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sc-space-2);
+  margin-top: var(--sc-space-1);
+}
+.sc-sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sc-space-4);
+  min-height: 0;
+  padding: var(--sc-space-4) var(--sc-gutter) var(--sc-space-5);
+  border-top: 1px solid var(--sc-line);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sc-sheet-body[hidden] {
+  display: none;
+}
+/* Content keeps its height; the body scrolls instead of squeezing the option list. */
+.sc-sheet-body > * {
+  flex-shrink: 0;
+}
+.sc-sheet-body > .sc-text-button {
+  align-self: flex-start;
+}
+.sc-sheet-body > .sc-connection-banner {
+  width: auto;
+  margin: 0;
+}
+.sc-sheet-body > .sc-demo-banner {
+  margin-top: 0;
+}
+.sc-sheet-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sc-space-2);
+}
+.sc-sheet-list-head h2 {
+  font-size: var(--sc-fs-title);
+  font-weight: 650;
+}
+.sc-sheet-sort {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-2);
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-label);
+}
+.sc-sheet-sort select {
+  width: auto;
+}
+.sc-sheet-card {
+  align-items: start;
+  min-height: 56px;
+}
+.sc-sheet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sc-space-2);
+}
+.sc-sheet-actions .sc-small-button {
+  flex: 1 1 auto;
+  min-height: 44px;
+}
+
+/* Pages: a bar with a back arrow, a scrolling body and an optional confirm footer. */
+.sc-page-stack {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+.sc-page {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sc-bg);
+  pointer-events: auto;
+}
+.sc-page.is-covered {
+  visibility: hidden;
+}
+.sc-page:focus {
+  outline: none;
+}
+.sc-page-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sc-space-1);
+  min-height: calc(56px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) var(--sc-space-3) 0 var(--sc-space-1);
+  border-bottom: 1px solid var(--sc-line);
+  background: var(--sc-surface);
+}
+.sc-page-bar-title {
+  overflow: hidden;
+  font-size: var(--sc-fs-title);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-page-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.sc-page[data-page='route'] .sc-page-body,
+.sc-page[data-page='costs'] .sc-page-body {
+  padding: var(--sc-space-5) var(--sc-gutter) var(--sc-space-8);
+  background: var(--sc-surface);
+}
+.sc-page .sc-page-title .sc-eyebrow {
+  display: none;
+}
+.sc-page .sc-page-content ~ .sc-google-attribution {
+  margin-top: calc(var(--sc-space-4) * -1);
+}
+.sc-page .sc-page-content + .sc-page-content {
+  padding-top: 0;
+}
+.sc-page-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sc-space-3);
+  padding: var(--sc-space-3) var(--sc-gutter) calc(var(--sc-space-3) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--sc-line);
+  background: var(--sc-surface);
+  box-shadow: var(--sc-shadow-raised);
+}
+.sc-page-footer .sc-primary-button {
+  min-height: 48px;
+}
+.sc-cost-footer {
+  justify-content: space-between;
+}
+.sc-cost-footer .sc-primary-button {
+  flex: none;
+  min-width: 96px;
+}
+.sc-mobile .sc-toast {
+  top: calc(env(safe-area-inset-top) + 80px);
+  bottom: auto;
+}
+/* Short or sideways screens: the map tools join the top row so none sit under the sheet. */
+@media (max-height: 600px) {
+  .sc-mobile-top:not(.sc-mobile-pick) {
+    right: calc(var(--sc-space-3) + 168px);
   }
-  .sc-map-stage {
-    flex: none;
-    height: 360px;
+  .sc-map-fabs {
+    top: calc(env(safe-area-inset-top) + var(--sc-space-3) + 4px);
+    grid-auto-flow: column;
   }
-  .sc-schematic {
-    padding: var(--sc-space-6) var(--sc-gutter);
-  }
-  .sc-plan-column {
-    padding-bottom: var(--sc-space-6);
-  }
-  .sc-selected-bar {
-    position: fixed;
-    inset: auto 0 0;
-    z-index: 15;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--sc-space-3);
-    padding: var(--sc-space-2) var(--sc-gutter)
-      calc(var(--sc-space-2) + env(safe-area-inset-bottom));
-    border-top: 1px solid var(--sc-line);
-    background: var(--sc-surface);
-    box-shadow: var(--sc-shadow-raised);
-  }
-  .sc-footer {
-    padding-bottom: 88px;
-  }
-  .sc-toast {
-    bottom: 88px;
+  .sc-mobile-weather {
+    right: var(--sc-space-3);
   }
 }
-.sc-selected-bar-text {
+.sc-selected-bar-text,
+.sc-cost-footer-total {
   display: grid;
   grid-template-columns: auto auto;
   align-items: baseline;
@@ -2535,7 +2953,8 @@ label.sc-route-measurements {
   gap: 0 var(--sc-space-2);
   min-width: 0;
 }
-.sc-selected-bar-text > span:first-child {
+.sc-selected-bar-text > span:first-child,
+.sc-cost-footer-total > span:first-child {
   grid-column: 1 / -1;
   overflow: hidden;
   color: var(--sc-muted);
@@ -2543,12 +2962,14 @@ label.sc-route-measurements {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sc-selected-bar-text strong {
+.sc-selected-bar-text strong,
+.sc-cost-footer-total strong {
   font-size: 19px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
-.sc-selected-bar-text > span:last-child {
+.sc-selected-bar-text > span:last-child,
+.sc-cost-footer-total > span:last-child {
   color: var(--sc-text-2);
   font-size: var(--sc-fs-caption);
   white-space: nowrap;

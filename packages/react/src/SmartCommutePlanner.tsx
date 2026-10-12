@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import {
   ArrowDownUp,
   ArrowDown,
+  ArrowLeft,
   ArrowRight,
   ArrowUp,
   Bookmark,
@@ -11,6 +12,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock3,
+  CloudSun,
   House,
   Info,
   Layers3,
@@ -20,6 +22,7 @@ import {
   Plus,
   RotateCcw,
   Route,
+  Settings as SettingsIcon,
   Sun,
   TrainFront,
   Trash2,
@@ -69,6 +72,8 @@ export interface SmartCommutePlannerProps {
 }
 
 type Screen = 'planner' | 'comparison' | 'breakdown' | 'settings' | 'about';
+/** Full-screen pages that open over the phone map; the map itself stays mounted underneath. */
+type MobilePage = 'route' | 'costs' | Exclude<Screen, 'planner'>;
 type Direction = 'outbound' | 'inbound';
 type Translator = ReturnType<typeof createTranslator>;
 interface PlannerState {
@@ -83,6 +88,30 @@ interface PlannerState {
   leaveNow: boolean;
 }
 const STORAGE_KEY = 'smart-commute-nz:v1';
+/** Below the wide two-column layout, or a phone held sideways, the planner becomes map-first. */
+const MOBILE_QUERY = '(max-width: 899px), (max-height: 520px) and (pointer: coarse)';
+const SHORT_VIEWPORT_QUERY = '(max-height: 600px)';
+/** Route framing on the phone map keeps clear of the route card above and the tools beside it. */
+const MOBILE_MAP_PADDING = { top: 120, right: 88, bottom: 40, left: 48 };
+const HISTORY_LAYER_KEY = 'smartCommuteLayer';
+const historyLayer = (value: unknown) => {
+  const layer = (value as Record<string, unknown> | null)?.[HISTORY_LAYER_KEY];
+  return typeof layer === 'number' && layer > 0 ? layer : 0;
+};
+function useMediaQuery(query: string): boolean {
+  const [matches, setMatches] = useState(
+    () => typeof window !== 'undefined' && Boolean(window.matchMedia?.(query).matches),
+  );
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const list = window.matchMedia(query);
+    const update = () => setMatches(list.matches);
+    update();
+    list.addEventListener?.('change', update);
+    return () => list.removeEventListener?.('change', update);
+  }, [query]);
+  return matches;
+}
 const directionKeys = { outbound: 'outbound', inbound: 'inbound' } as const;
 const legKeys = {
   drive: 'drive',
@@ -119,6 +148,20 @@ const providerNoteKeys: [string, MessageKey][] = [
   ['Outbound alternatives are paired', 'providerNotePairedReturn'],
   ['Google used fallback routing', 'providerNoteFallback'],
 ];
+/** What the route page changed, so leaving it without confirming restores the planned trip. */
+interface RouteDraft {
+  fingerprint: string;
+  origin: Location;
+  destination: Location;
+  leaveNow: boolean;
+  departure: string;
+  returnTime: string;
+  roundTrip: boolean;
+  options: JourneyOption[];
+  googleResponse: ProviderRouteResult | null;
+  selectedId: string;
+  editingMode: JourneyOption['mode'];
+}
 const toLocation = (value: Location | string): Location =>
   typeof value === 'string' ? { label: value } : value;
 const cloneOption = (option: JourneyOption): JourneyOption => ({
@@ -345,6 +388,19 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const [locale, setLocale] = useState<Locale>(props.locale ?? 'en');
   const [theme, setTheme] = useState<'light' | 'dark'>(props.theme ?? 'light');
   const [screen, setScreen] = useState<Screen>('planner');
+  const isMobile = useMediaQuery(MOBILE_QUERY);
+  const shortViewport = useMediaQuery(SHORT_VIEWPORT_QUERY);
+  const [pages, setPages] = useState<MobilePage[]>([]);
+  // Short or sideways screens start with the cost sheet collapsed so the map stays usable.
+  const [sheetOpen, setSheetOpen] = useState(
+    () => typeof window === 'undefined' || !window.matchMedia?.(SHORT_VIEWPORT_QUERY).matches,
+  );
+  const [weatherOpen, setWeatherOpen] = useState(false);
+  const routeEditing = isMobile && pages.includes('route');
+  const routeEditingRef = useRef(routeEditing);
+  routeEditingRef.current = routeEditing;
+  // Address search lives in the planner column on wide screens and in the route page on phones.
+  const addressInputsMounted = isMobile ? routeEditing : screen === 'planner';
   const [editingMode, setEditingMode] = useState<JourneyOption['mode']>('drive');
   const [selectedId, setSelectedId] = useState('drive');
   const [notice, setNotice] = useState('');
@@ -442,6 +498,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   });
   const activeQuery = useRef(liveQueryFingerprint);
   activeQuery.current = liveQueryFingerprint;
+  const routeDraft = useRef<RouteDraft | null>(null);
+  const restoredFingerprint = useRef('');
   const t = useMemo(() => createTranslator(locale), [locale]);
   const money = (value: number) => formatMoney(value, locale);
   const moneyWithRange = (value: number, range?: CostRange) =>
@@ -753,13 +811,17 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     autocompletePending.current = false;
     setAddressSearchEnabled(false);
     setAddressSearchPending(false);
-  }, [screen, googleMode, provider]);
+  }, [addressInputsMounted, googleMode, provider]);
   useEffect(() => {
     for (const control of autocompleteControls.current) {
       control.setValue(control.field === 'origin' ? state.origin.label : state.destination.label);
     }
   }, [state.origin.label, state.destination.label, addressSearchEnabled]);
   useEffect(() => {
+    // Discarding a route edit restores the planned trip and its routes; keep them.
+    const restored = restoredFingerprint.current === liveQueryFingerprint;
+    restoredFingerprint.current = '';
+    if (restored) return;
     setState((current) =>
       current.options.some(hasGoogleProvenance)
         ? { ...current, options: current.options.filter((option) => !hasGoogleProvenance(option)) }
@@ -1126,12 +1188,16 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       mapElementRef.current.style.width = '100%';
       mapElementRef.current.style.height = '100%';
       googleMapRef.current.replaceChildren(mapElementRef.current);
-      await provider.initializeMap(mapElementRef.current, (error) => {
-        if (!mounted.current || activeProvider.current !== provider) return;
-        mapReadyProvider.current = null;
-        setGoogleError(describeGoogleError(error));
-        setGoogleStatus('error');
-      });
+      await provider.initializeMap(
+        mapElementRef.current,
+        (error) => {
+          if (!mounted.current || activeProvider.current !== provider) return;
+          mapReadyProvider.current = null;
+          setGoogleError(describeGoogleError(error));
+          setGoogleStatus('error');
+        },
+        { fullscreenControl: !isMobile },
+      );
       if (!mounted.current || activeProvider.current !== provider) {
         provider.dispose();
         return;
@@ -1302,6 +1368,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       setGoogleStatus('ready');
       setNotice('');
       if (response.routes[0]) setSelectedId(response.routes[0].id);
+      if (!window.matchMedia?.(SHORT_VIEWPORT_QUERY).matches) setSheetOpen(true);
     } catch (error) {
       if (
         !mounted.current ||
@@ -1342,6 +1409,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   useEffect(() => {
     const context = autoPlanContext.current;
     if (!autoPlanToken || !context.googleMode || context.googleStatus !== 'ready') return;
+    // The phone route page is a draft: it plans only when the person confirms it.
+    if (routeEditingRef.current) return;
     const mode = context.editingMode === 'transit' ? 'transit' : 'drive';
     // Transit cannot take stops; the stop list already explains why nothing is planned.
     if (mode === 'transit' && context.stops > 0) return;
@@ -1353,14 +1422,15 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     if (googleMode && screen === 'planner' && googleStatus === 'idle') void loadMapAction.current();
   }, [googleMode, googleStatus, provider, screen]);
   useEffect(() => {
-    if (googleMode && screen === 'planner' && googleStatus === 'ready' && !addressSearchEnabled) {
+    if (googleMode && addressInputsMounted && googleStatus === 'ready' && !addressSearchEnabled) {
       void addressSearchAction.current();
     }
-  }, [googleMode, googleStatus, addressSearchEnabled, provider, screen]);
+  }, [googleMode, googleStatus, addressSearchEnabled, provider, addressInputsMounted]);
   useEffect(() => {
     if (
       !googleMode ||
       googleStatus !== 'ready' ||
+      routeEditing ||
       !lastRequestedQuery.current ||
       lastRequestedQuery.current === liveQueryFingerprint
     )
@@ -1370,13 +1440,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         void routeAction.current(lastRequestedMode.current);
     }, 800);
     return () => window.clearTimeout(timeout);
-  }, [googleMode, googleStatus, liveQueryFingerprint]);
+  }, [googleMode, googleStatus, liveQueryFingerprint, routeEditing]);
 
   useEffect(() => {
     if (
       !stopoverSearchOpen ||
       !googleMode ||
-      screen !== 'planner' ||
+      !addressInputsMounted ||
       editingMode !== 'drive' ||
       !addressSearchEnabled ||
       !stopoverSearchRef.current
@@ -1416,7 +1486,15 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       stopoverSearchControl.current?.();
       stopoverSearchControl.current = null;
     };
-  }, [stopoverSearchOpen, googleMode, screen, editingMode, addressSearchEnabled, provider, t]);
+  }, [
+    stopoverSearchOpen,
+    googleMode,
+    addressInputsMounted,
+    editingMode,
+    addressSearchEnabled,
+    provider,
+    t,
+  ]);
 
   const googleMapReady = googleStatus === 'ready' || googleStatus === 'routes';
   // Every alternative is drawn with its outbound time and commute cost, like a directions map.
@@ -1452,6 +1530,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       labels: JSON.parse(mapLabelsKey) as Record<string, string>,
       onSelect: (id) => routeSelectAction.current(id),
       endpoints: JSON.parse(endpointLabels) as { start: string; end: string },
+      ...(isMobile ? { padding: MOBILE_MAP_PADDING } : {}),
     });
   }, [
     googleMode,
@@ -1461,6 +1540,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     mapLabelsKey,
     endpointLabels,
     provider,
+    isMobile,
   ]);
   useEffect(() => {
     if (googleMode && screen === 'planner' && googleMapReady)
@@ -2211,361 +2291,414 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     );
   };
 
-  const renderInputs = () => {
+  const renderLocationSection = () => (
+    <section className="sc-input-section">
+      <h2 id={`${plannerId}-journey`} className="sc-visually-hidden">
+        {t('yourJourney')}
+      </h2>
+      <div className="sc-location-fields">
+        {renderLocationRow('origin')}
+        {googleMode &&
+          drivingPreference &&
+          (editingMode === 'drive' || drivingStops.length > 0) && (
+            <section className="sc-stopovers" aria-label={t('waypoints')}>
+              <div className="sc-stopover-heading">
+                <h3>{t('waypoints')}</h3>
+                <span>{drivingStops.length}/10</span>
+              </div>
+              {drivingStops.length > 1 && <p className="sc-help">{t('stopoverHelp')}</p>}
+              {drivingStops.length > 0 && (
+                <ol className="sc-stopover-list">
+                  {drivingStops.map((place, index) => (
+                    <li key={`${index}-${place.label}`}>
+                      <span className="sc-stopover-number" aria-hidden="true">
+                        {index + 1}
+                      </span>
+                      <span className="sc-stopover-label">{place.label}</span>
+                      <div className="sc-stopover-controls">
+                        <button
+                          className="sc-icon-button"
+                          aria-label={`${t('moveStopoverUp')} ${place.label}`}
+                          disabled={index === 0}
+                          onClick={() => moveDrivingStop(index, -1)}
+                        >
+                          <ArrowUp size={15} />
+                        </button>
+                        <button
+                          className="sc-icon-button"
+                          aria-label={`${t('moveStopoverDown')} ${place.label}`}
+                          disabled={index === drivingStops.length - 1}
+                          onClick={() => moveDrivingStop(index, 1)}
+                        >
+                          <ArrowDown size={15} />
+                        </button>
+                        <button
+                          className="sc-icon-button"
+                          aria-label={`${t('removeWaypoint')} ${place.label}`}
+                          onClick={() =>
+                            updateOption(drivingPreference.id, {
+                              waypoints: drivingStops.filter((_, item) => item !== index),
+                            })
+                          }
+                        >
+                          <X size={15} />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+              {stopoverSearchOpen && editingMode === 'drive' ? (
+                <div className="sc-stopover-search">
+                  <div className="sc-field sc-live-address">
+                    <span>{t('stopoverSearch')}</span>
+                    <div ref={stopoverSearchRef} />
+                  </div>
+                  <div className="sc-stopover-search-actions">
+                    <button
+                      className="sc-small-button"
+                      disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
+                      onClick={() => appendDrivingStop(stopoverDraft)}
+                    >
+                      <Plus size={15} />
+                      {t('addStopover')}
+                    </button>
+                    <button
+                      className="sc-icon-button"
+                      aria-label={t('cancelStopoverSearch')}
+                      onClick={() => {
+                        setStopoverSearchOpen(false);
+                        setStopoverDraft({ label: '' });
+                      }}
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <button
+                    className="sc-text-button sc-stopover-add"
+                    onClick={() => {
+                      setStopoverDraft({ label: '' });
+                      setStopoverSearchOpen(true);
+                    }}
+                    disabled={
+                      editingMode !== 'drive' || drivingStops.length >= 10 || !addressSearchEnabled
+                    }
+                  >
+                    <Plus size={16} />
+                    {t('addStopover')}
+                  </button>
+                  {/* Phones have no map toolbar; the route page offers the map pick here. */}
+                  {isMobile && (
+                    <button
+                      className="sc-text-button sc-stopover-add"
+                      onClick={beginMapStopoverPick}
+                      disabled={
+                        googleStatus !== 'ready' ||
+                        editingMode !== 'drive' ||
+                        drivingStops.length >= 10
+                      }
+                    >
+                      <MapPin size={16} />
+                      {t('pickStopoverOnMap')}
+                    </button>
+                  )}
+                </>
+              )}
+              {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
+              {stopoverRoutingBlocked && (
+                <p className="sc-error" role="status">
+                  {t('transitStopoverUnsupported')}
+                </p>
+              )}
+            </section>
+          )}
+        {renderLocationRow('destination')}
+        {renderDestinationHours()}
+        <button
+          className="sc-swap"
+          aria-label={t('swap')}
+          onClick={() =>
+            setState((current) => ({
+              ...current,
+              origin: current.destination,
+              destination: current.origin,
+              options: current.options.map((option) =>
+                option.mode === 'drive' && !hasGoogleProvenance(option)
+                  ? { ...option, waypoints: [...option.waypoints].reverse() }
+                  : option,
+              ),
+            }))
+          }
+        >
+          <ArrowDownUp size={16} />
+        </button>
+      </div>
+      <div className="sc-location-actions">
+        <button className="sc-text-button" onClick={useLocation} disabled={locationLoading}>
+          <LocateFixed size={15} />
+          {t(locationLoading ? 'locating' : 'useLocation')}
+        </button>
+        {isMobile && googleMode && (
+          <button
+            className="sc-text-button"
+            onClick={beginMapDestinationPick}
+            disabled={googleStatus !== 'ready'}
+          >
+            <MapPin size={15} />
+            {t('pickDestinationOnMap')}
+          </button>
+        )}
+      </div>
+      {locationError && (
+        <p role="alert" className="sc-error">
+          {t('locationFailed')}
+        </p>
+      )}
+      {(!googleMode || !googleResponse) && (
+        <p className="sc-help">{t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}</p>
+      )}
+      {state.places.length > 0 && (
+        <details className="sc-saved-places">
+          <summary>
+            {t('savedPlaces')}
+            <ChevronDown size={15} />
+          </summary>
+          {state.places.map((place) => (
+            <div className="sc-saved-place" key={place.label}>
+              <span>{place.label}</span>
+              <button
+                className="sc-icon-button"
+                title={t('applyOrigin')}
+                aria-label={`${t('applyOrigin')} ${place.label}`}
+                onClick={() => setState((current) => ({ ...current, origin: place }))}
+              >
+                <House size={15} />
+              </button>
+              <button
+                className="sc-icon-button"
+                title={t('applyDestination')}
+                aria-label={`${t('applyDestination')} ${place.label}`}
+                onClick={() => setState((current) => ({ ...current, destination: place }))}
+              >
+                <MapPin size={15} />
+              </button>
+              <button
+                className="sc-icon-button"
+                aria-label={`${t('removePlace')} ${place.label}`}
+                onClick={() =>
+                  setState((current) => ({
+                    ...current,
+                    places: current.places.filter((saved) => saved.label !== place.label),
+                  }))
+                }
+              >
+                <X size={15} />
+              </button>
+            </div>
+          ))}
+        </details>
+      )}
+    </section>
+  );
+
+  const renderScheduleSection = () => (
+    <section className="sc-input-section sc-schedule">
+      <div className="sc-schedule-toggles">
+        <label className="sc-checkbox">
+          <input
+            type="checkbox"
+            checked={state.settings.roundTrip}
+            onChange={(event) => updateSettings({ roundTrip: event.target.checked })}
+          />
+          <span>{t('roundTrip')}</span>
+        </label>
+        <label className="sc-checkbox">
+          <input
+            type="checkbox"
+            checked={state.leaveNow}
+            onChange={(event) =>
+              setState((current) => ({ ...current, leaveNow: event.target.checked }))
+            }
+          />
+          <span>{t('leaveNow')}</span>
+        </label>
+      </div>
+      {(!state.leaveNow || showReturnTime) && (
+        <div className="sc-field-grid">
+          {!state.leaveNow && (
+            <TextField
+              type="datetime-local"
+              label={t('departure')}
+              value={state.departure}
+              onChange={(departure) => setState((current) => ({ ...current, departure }))}
+              error={departureInvalid ? t('departureRequired') : undefined}
+            />
+          )}
+          {showReturnTime && (
+            <TextField
+              type="datetime-local"
+              label={t('returnTime')}
+              value={state.returnTime}
+              onChange={(returnTime) => setState((current) => ({ ...current, returnTime }))}
+              error={returnTimeMissing ? t('googleMissingReturn') : undefined}
+            />
+          )}
+        </div>
+      )}
+      <p
+        className={`sc-help ${browserTimeZone !== 'Pacific/Auckland' ? 'sc-timezone-warning' : ''}`}
+      >
+        {t('browserTimezone', { zone: browserTimeZone })}
+        {browserTimeZone !== 'Pacific/Auckland' && ` ${t('aucklandTimeHint')}`}
+      </p>
+    </section>
+  );
+
+  const renderModeSwitch = () => (
+    <div className="sc-mode-switch" role="group" aria-label={t('routeParameters')}>
+      {(googleMode
+        ? (['drive', 'transit'] as const)
+        : (['drive', 'transit', 'hybrid'] as const)
+      ).map((mode) => (
+        <button
+          key={mode}
+          className={editingMode === mode ? 'is-active' : ''}
+          onClick={() => {
+            setEditingMode(mode);
+            if (googleMode && mode !== editingMode) setAutoPlanToken((count) => count + 1);
+            // Keep the summary and schematic on the option being edited.
+            const edited = comparison.result?.results.find((result) => result.mode === mode);
+            if (!googleMode && edited && selected?.mode !== mode) selectResult(edited);
+          }}
+          aria-pressed={editingMode === mode}
+        >
+          <ModeIcon mode={mode} size={16} />
+          <span>{t(mode)}</span>
+        </button>
+      ))}
+    </div>
+  );
+
+  // Phones confirm the route page from its footer, so the inline plan button is left out there.
+  const renderRoutingActions = (showPlanButton: boolean) => (
+    <div className="sc-routing-actions">
+      {showPlanButton && (
+        <button
+          className="sc-primary-button sc-full-width"
+          onClick={() => void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')}
+          disabled={
+            googleStatus !== 'ready' ||
+            comparison.error ||
+            stopoverRoutingBlocked ||
+            departureInvalid ||
+            returnTimeMissing
+          }
+        >
+          <Route size={16} />
+          {t(googleStatus === 'routes' ? 'googleRoutesLoading' : 'planRoute')}
+        </button>
+      )}
+      {googleError && (
+        <p className="sc-error" role="alert">
+          {googleError}
+        </p>
+      )}
+      {googleRequests > 0 && (
+        <small className="sc-help">{t('googleMetrics', { count: googleRequests })}</small>
+      )}
+      {editingMode === 'transit' && (
+        <div className="sc-at-fare-link">
+          <a
+            href="https://at.govt.nz/bus-train-ferry/journey-planner"
+            target="_blank"
+            rel="noreferrer"
+          >
+            {t('verifyATFare')}
+          </a>
+          <p className="sc-help">{t('atFareLinkHelp')}</p>
+        </div>
+      )}
+    </div>
+  );
+
+  // Fares, fuel, parking and tolls for the option being edited; live routes edit the selected one.
+  const renderCostEditors = () => {
     const editorOptions = visibleOptions.filter(
       (option) =>
         option.mode === editingMode && (!googleMode || option.id === (selected?.id ?? selectedId)),
     );
-    return (
-      <section className="sc-input-panel" aria-labelledby={`${plannerId}-journey`}>
-        <section className="sc-input-section">
-          <h2 id={`${plannerId}-journey`} className="sc-visually-hidden">
-            {t('yourJourney')}
-          </h2>
-          <div className="sc-location-fields">
-            {renderLocationRow('origin')}
-            {googleMode &&
-              drivingPreference &&
-              (editingMode === 'drive' || drivingStops.length > 0) && (
-                <section className="sc-stopovers" aria-label={t('waypoints')}>
-                  <div className="sc-stopover-heading">
-                    <h3>{t('waypoints')}</h3>
-                    <span>{drivingStops.length}/10</span>
-                  </div>
-                  {drivingStops.length > 1 && <p className="sc-help">{t('stopoverHelp')}</p>}
-                  {drivingStops.length > 0 && (
-                    <ol className="sc-stopover-list">
-                      {drivingStops.map((place, index) => (
-                        <li key={`${index}-${place.label}`}>
-                          <span className="sc-stopover-number" aria-hidden="true">
-                            {index + 1}
-                          </span>
-                          <span className="sc-stopover-label">{place.label}</span>
-                          <div className="sc-stopover-controls">
-                            <button
-                              className="sc-icon-button"
-                              aria-label={`${t('moveStopoverUp')} ${place.label}`}
-                              disabled={index === 0}
-                              onClick={() => moveDrivingStop(index, -1)}
-                            >
-                              <ArrowUp size={15} />
-                            </button>
-                            <button
-                              className="sc-icon-button"
-                              aria-label={`${t('moveStopoverDown')} ${place.label}`}
-                              disabled={index === drivingStops.length - 1}
-                              onClick={() => moveDrivingStop(index, 1)}
-                            >
-                              <ArrowDown size={15} />
-                            </button>
-                            <button
-                              className="sc-icon-button"
-                              aria-label={`${t('removeWaypoint')} ${place.label}`}
-                              onClick={() =>
-                                updateOption(drivingPreference.id, {
-                                  waypoints: drivingStops.filter((_, item) => item !== index),
-                                })
-                              }
-                            >
-                              <X size={15} />
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ol>
-                  )}
-                  {stopoverSearchOpen && editingMode === 'drive' ? (
-                    <div className="sc-stopover-search">
-                      <div className="sc-field sc-live-address">
-                        <span>{t('stopoverSearch')}</span>
-                        <div ref={stopoverSearchRef} />
-                      </div>
-                      <div className="sc-stopover-search-actions">
-                        <button
-                          className="sc-small-button"
-                          disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
-                          onClick={() => appendDrivingStop(stopoverDraft)}
-                        >
-                          <Plus size={15} />
-                          {t('addStopover')}
-                        </button>
-                        <button
-                          className="sc-icon-button"
-                          aria-label={t('cancelStopoverSearch')}
-                          onClick={() => {
-                            setStopoverSearchOpen(false);
-                            setStopoverDraft({ label: '' });
-                          }}
-                        >
-                          <X size={16} />
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <button
-                      className="sc-text-button sc-stopover-add"
-                      onClick={() => {
-                        setStopoverDraft({ label: '' });
-                        setStopoverSearchOpen(true);
-                      }}
-                      disabled={
-                        editingMode !== 'drive' ||
-                        drivingStops.length >= 10 ||
-                        !addressSearchEnabled
-                      }
-                    >
-                      <Plus size={16} />
-                      {t('addStopover')}
-                    </button>
-                  )}
-                  {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
-                  {stopoverRoutingBlocked && (
-                    <p className="sc-error" role="status">
-                      {t('transitStopoverUnsupported')}
-                    </p>
-                  )}
-                </section>
-              )}
-            {renderLocationRow('destination')}
-            {renderDestinationHours()}
-            <button
-              className="sc-swap"
-              aria-label={t('swap')}
-              onClick={() =>
-                setState((current) => ({
-                  ...current,
-                  origin: current.destination,
-                  destination: current.origin,
-                  options: current.options.map((option) =>
-                    option.mode === 'drive' && !hasGoogleProvenance(option)
-                      ? { ...option, waypoints: [...option.waypoints].reverse() }
-                      : option,
-                  ),
-                }))
-              }
-            >
-              <ArrowDownUp size={16} />
-            </button>
-          </div>
-          <div className="sc-location-actions">
-            <button className="sc-text-button" onClick={useLocation} disabled={locationLoading}>
-              <LocateFixed size={15} />
-              {t(locationLoading ? 'locating' : 'useLocation')}
-            </button>
-          </div>
-          {locationError && (
-            <p role="alert" className="sc-error">
-              {t('locationFailed')}
-            </p>
-          )}
-          {(!googleMode || !googleResponse) && (
-            <p className="sc-help">{t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}</p>
-          )}
-          {state.places.length > 0 && (
-            <details className="sc-saved-places">
-              <summary>
-                {t('savedPlaces')}
-                <ChevronDown size={15} />
-              </summary>
-              {state.places.map((place) => (
-                <div className="sc-saved-place" key={place.label}>
-                  <span>{place.label}</span>
-                  <button
-                    className="sc-icon-button"
-                    title={t('applyOrigin')}
-                    aria-label={`${t('applyOrigin')} ${place.label}`}
-                    onClick={() => setState((current) => ({ ...current, origin: place }))}
-                  >
-                    <House size={15} />
-                  </button>
-                  <button
-                    className="sc-icon-button"
-                    title={t('applyDestination')}
-                    aria-label={`${t('applyDestination')} ${place.label}`}
-                    onClick={() => setState((current) => ({ ...current, destination: place }))}
-                  >
-                    <MapPin size={15} />
-                  </button>
-                  <button
-                    className="sc-icon-button"
-                    aria-label={`${t('removePlace')} ${place.label}`}
-                    onClick={() =>
-                      setState((current) => ({
-                        ...current,
-                        places: current.places.filter((saved) => saved.label !== place.label),
-                      }))
-                    }
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-              ))}
-            </details>
-          )}
-        </section>
-        <section className="sc-input-section sc-schedule">
-          <div className="sc-schedule-toggles">
-            <label className="sc-checkbox">
-              <input
-                type="checkbox"
-                checked={state.settings.roundTrip}
-                onChange={(event) => updateSettings({ roundTrip: event.target.checked })}
-              />
-              <span>{t('roundTrip')}</span>
-            </label>
-            <label className="sc-checkbox">
-              <input
-                type="checkbox"
-                checked={state.leaveNow}
-                onChange={(event) =>
-                  setState((current) => ({ ...current, leaveNow: event.target.checked }))
-                }
-              />
-              <span>{t('leaveNow')}</span>
-            </label>
-          </div>
-          {(!state.leaveNow || showReturnTime) && (
-            <div className="sc-field-grid">
-              {!state.leaveNow && (
-                <TextField
-                  type="datetime-local"
-                  label={t('departure')}
-                  value={state.departure}
-                  onChange={(departure) => setState((current) => ({ ...current, departure }))}
-                  error={departureInvalid ? t('departureRequired') : undefined}
-                />
-              )}
-              {showReturnTime && (
-                <TextField
-                  type="datetime-local"
-                  label={t('returnTime')}
-                  value={state.returnTime}
-                  onChange={(returnTime) => setState((current) => ({ ...current, returnTime }))}
-                  error={returnTimeMissing ? t('googleMissingReturn') : undefined}
-                />
-              )}
-            </div>
-          )}
-          <p
-            className={`sc-help ${browserTimeZone !== 'Pacific/Auckland' ? 'sc-timezone-warning' : ''}`}
-          >
-            {t('browserTimezone', { zone: browserTimeZone })}
-            {browserTimeZone !== 'Pacific/Auckland' && ` ${t('aucklandTimeHint')}`}
-          </p>
-        </section>
-        <section className="sc-input-section">
-          <h3 className="sc-section-label">{t('chooseMode')}</h3>
-          <div className="sc-mode-switch" role="group" aria-label={t('routeParameters')}>
-            {(googleMode
-              ? (['drive', 'transit'] as const)
-              : (['drive', 'transit', 'hybrid'] as const)
-            ).map((mode) => (
-              <button
-                key={mode}
-                className={editingMode === mode ? 'is-active' : ''}
-                onClick={() => {
-                  setEditingMode(mode);
-                  if (googleMode && mode !== editingMode) setAutoPlanToken((count) => count + 1);
-                  // Keep the summary and schematic on the option being edited.
-                  const edited = comparison.result?.results.find((result) => result.mode === mode);
-                  if (!googleMode && edited && selected?.mode !== mode) selectResult(edited);
-                }}
-                aria-pressed={editingMode === mode}
-              >
-                <ModeIcon mode={mode} size={16} />
-                <span>{t(mode)}</span>
-              </button>
-            ))}
-          </div>
-          {googleMode ? (
-            <>
-              <div className="sc-routing-actions">
-                <button
-                  className="sc-primary-button sc-full-width"
-                  onClick={() =>
-                    void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')
-                  }
-                  disabled={
-                    googleStatus !== 'ready' ||
-                    comparison.error ||
-                    stopoverRoutingBlocked ||
-                    departureInvalid ||
-                    returnTimeMissing
-                  }
-                >
-                  <Route size={16} />
-                  {t(googleStatus === 'routes' ? 'googleRoutesLoading' : 'planRoute')}
-                </button>
-                {googleError && (
-                  <p className="sc-error" role="alert">
-                    {googleError}
-                  </p>
-                )}
-                {googleRequests > 0 && (
-                  <small className="sc-help">{t('googleMetrics', { count: googleRequests })}</small>
-                )}
-                {editingMode === 'transit' && (
-                  <div className="sc-at-fare-link">
-                    <a
-                      href="https://at.govt.nz/bus-train-ferry/journey-planner"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {t('verifyATFare')}
-                    </a>
-                    <p className="sc-help">{t('atFareLinkHelp')}</p>
-                  </div>
-                )}
-              </div>
-              <details className="sc-advanced-inputs">
-                <summary>
-                  {t('adjustCosts')}
-                  <ChevronDown size={16} />
-                </summary>
-                <div className="sc-advanced-content">
-                  {editingMode !== 'transit' && renderCarFields()}
-                  {editorOptions.map((option) => renderOptionEditor(option, true))}
-                  {renderSavedRoutes()}
-                </div>
-              </details>
-            </>
-          ) : (
-            <div className="sc-mode-editor">
-              <p className="sc-help">{t('routeHint')}</p>
-              {editingMode !== 'transit' && renderCarFields()}
-              {editorOptions.map((option) => renderOptionEditor(option, editorOptions.length > 1))}
-              {editingMode === 'drive' && (
-                <button className="sc-text-button" onClick={addDrivingRoute}>
-                  <Plus size={15} />
-                  {t('alternativeRoute')}
-                </button>
-              )}
-              {renderSavedRoutes()}
-            </div>
-          )}
-        </section>
-        {props.googleApiKey && !googleMode && (
-          <div className="sc-manual-fallback">
-            <p>{t(!online ? 'offlineFallback' : 'manualFallback')}</p>
-            {googleError && (
-              <p className="sc-error" role="alert">
-                {googleError}
-              </p>
-            )}
-            <button className="sc-small-button" onClick={reconnectGoogle} disabled={!online}>
-              {t('reconnectGoogle')}
-            </button>
-          </div>
-        )}
-        {googleMode && (
-          <button className="sc-text-button" onClick={() => setManualRequested(true)}>
-            {t('useManualInputs')}
+    return googleMode ? (
+      <>
+        {editingMode !== 'transit' && renderCarFields()}
+        {editorOptions.map((option) => renderOptionEditor(option, true))}
+        {renderSavedRoutes()}
+      </>
+    ) : (
+      <>
+        <p className="sc-help">{t('routeHint')}</p>
+        {editingMode !== 'transit' && renderCarFields()}
+        {editorOptions.map((option) => renderOptionEditor(option, editorOptions.length > 1))}
+        {editingMode === 'drive' && (
+          <button className="sc-text-button" onClick={addDrivingRoute}>
+            <Plus size={15} />
+            {t('alternativeRoute')}
           </button>
         )}
-        {!googleMode && <p className="sc-help sc-return-note">{t('estimatedReturn')}</p>}
-      </section>
+        {renderSavedRoutes()}
+      </>
     );
   };
+
+  const renderManualFallback = () =>
+    props.googleApiKey &&
+    !googleMode && (
+      <div className="sc-manual-fallback">
+        <p>{t(!online ? 'offlineFallback' : 'manualFallback')}</p>
+        {googleError && (
+          <p className="sc-error" role="alert">
+            {googleError}
+          </p>
+        )}
+        <button className="sc-small-button" onClick={reconnectGoogle} disabled={!online}>
+          {t('reconnectGoogle')}
+        </button>
+      </div>
+    );
+
+  const renderInputs = () => (
+    <section className="sc-input-panel" aria-labelledby={`${plannerId}-journey`}>
+      {renderLocationSection()}
+      {renderScheduleSection()}
+      <section className="sc-input-section">
+        <h3 className="sc-section-label">{t('chooseMode')}</h3>
+        {renderModeSwitch()}
+        {googleMode ? (
+          <>
+            {renderRoutingActions(true)}
+            <details className="sc-advanced-inputs">
+              <summary>
+                {t('adjustCosts')}
+                <ChevronDown size={16} />
+              </summary>
+              <div className="sc-advanced-content">{renderCostEditors()}</div>
+            </details>
+          </>
+        ) : (
+          <div className="sc-mode-editor">{renderCostEditors()}</div>
+        )}
+      </section>
+      {renderManualFallback()}
+      {googleMode && (
+        <button className="sc-text-button" onClick={() => setManualRequested(true)}>
+          {t('useManualInputs')}
+        </button>
+      )}
+      {!googleMode && <p className="sc-help sc-return-note">{t('estimatedReturn')}</p>}
+    </section>
+  );
 
   const legIcon = (mode: TravelLeg['mode']) =>
     mode === 'drive' ? (
@@ -2578,7 +2711,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       <Route size={16} />
     );
 
-  const renderSchematic = () => {
+  const renderSchematic = (compact = false) => {
     const diagramMode = selected?.mode ?? editingMode;
     const legs = selected?.option.outbound ?? [];
     const mainLegs = legs.filter((leg) => !minorModes.has(leg.mode));
@@ -2627,41 +2760,49 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     steps.push(stop('end', t('finish'), state.destination.label, 'end'));
     return (
       <section className="sc-map-panel" aria-label={t(googleMode ? 'googleMapTitle' : 'schematic')}>
-        <div className="sc-map-toolbar">
-          <span>{t(googleMode ? 'googleMapTitle' : 'schematic')}</span>
-          <div className="sc-map-tools">
-            {googleMode && (
-              <button
-                className="sc-small-button"
-                onClick={mapDestinationPicking ? cancelMapDestinationPick : beginMapDestinationPick}
-                disabled={!mapDestinationPicking && googleStatus !== 'ready'}
-                aria-pressed={mapDestinationPicking}
-              >
-                {mapDestinationPicking ? <X size={15} /> : <MapPin size={15} />}
-                {t(mapDestinationPicking ? 'cancelDestinationPick' : 'pickDestinationOnMap')}
-              </button>
-            )}
-            {googleMode && (editingMode === 'drive' || mapStopoverPicking) && (
-              <button
-                className="sc-small-button"
-                onClick={mapStopoverPicking ? cancelMapStopoverPick : beginMapStopoverPick}
-                disabled={
-                  !mapStopoverPicking &&
-                  (googleStatus !== 'ready' || editingMode !== 'drive' || drivingStops.length >= 10)
-                }
-                aria-pressed={mapStopoverPicking}
-              >
-                {mapStopoverPicking ? <X size={15} /> : <Plus size={15} />}
-                {t(mapStopoverPicking ? 'cancelStopoverPick' : 'pickStopoverOnMap')}
-              </button>
-            )}
+        {!compact && (
+          <div className="sc-map-toolbar">
+            <span>{t(googleMode ? 'googleMapTitle' : 'schematic')}</span>
+            <div className="sc-map-tools">
+              {googleMode && (
+                <button
+                  className="sc-small-button"
+                  onClick={
+                    mapDestinationPicking ? cancelMapDestinationPick : beginMapDestinationPick
+                  }
+                  disabled={!mapDestinationPicking && googleStatus !== 'ready'}
+                  aria-pressed={mapDestinationPicking}
+                >
+                  {mapDestinationPicking ? <X size={15} /> : <MapPin size={15} />}
+                  {t(mapDestinationPicking ? 'cancelDestinationPick' : 'pickDestinationOnMap')}
+                </button>
+              )}
+              {googleMode && (editingMode === 'drive' || mapStopoverPicking) && (
+                <button
+                  className="sc-small-button"
+                  onClick={mapStopoverPicking ? cancelMapStopoverPick : beginMapStopoverPick}
+                  disabled={
+                    !mapStopoverPicking &&
+                    (googleStatus !== 'ready' ||
+                      editingMode !== 'drive' ||
+                      drivingStops.length >= 10)
+                  }
+                  aria-pressed={mapStopoverPicking}
+                >
+                  {mapStopoverPicking ? <X size={15} /> : <Plus size={15} />}
+                  {t(mapStopoverPicking ? 'cancelStopoverPick' : 'pickStopoverOnMap')}
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-        <WeatherBar
-          state={weather}
-          locale={locale}
-          originLabel={state.origin.label.split(',')[0]?.trim() || state.origin.label}
-        />
+        )}
+        {!compact && (
+          <WeatherBar
+            state={weather}
+            locale={locale}
+            originLabel={state.origin.label.split(',')[0]?.trim() || state.origin.label}
+          />
+        )}
         {googleMode && (
           <div className="sc-map-stage">
             <div
@@ -2669,7 +2810,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               ref={googleMapRef}
               aria-label={t('googleMapDescription')}
             />
-            {(mapStopoverPicking || mapDestinationPicking) && (
+            {!compact && (mapStopoverPicking || mapDestinationPicking) && (
               <p className="sc-map-stopover-prompt" role="status">
                 {t(mapDestinationPicking ? 'pickDestinationHint' : 'pickStopoverHint')}
               </p>
@@ -2679,7 +2820,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 {t('googleLoading')}
               </div>
             )}
-            {googleStatus === 'routes' && (
+            {!compact && googleStatus === 'routes' && (
               <p className="sc-help" role="status">
                 {t('googleRoutesLoading')}
               </p>
@@ -2759,7 +2900,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           })}
         </p>
       </div>
-      <button className="sc-text-button" onClick={() => setScreen('breakdown')}>
+      <button className="sc-text-button" onClick={() => openScreen('breakdown')}>
         {t('viewBreakdown')}
         <ArrowRight size={15} />
       </button>
@@ -2786,6 +2927,49 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         })}
       </section>
     );
+
+  // Line names, stops and ranking tags shown on each option, wide or compact.
+  const describeCard = (result: RouteResult) => {
+    const transitLegs = result.option.outbound.flatMap((leg) => (leg.transit ? [leg.transit] : []));
+    const lines = [
+      ...new Set(
+        transitLegs
+          .map((leg) => leg.lineShortName || leg.lineName)
+          .filter((line): line is string => Boolean(line)),
+      ),
+    ];
+    const departureStop = transitLegs.find((leg) => leg.departureStop)?.departureStop;
+    const arrivalStop = [...transitLegs].reverse().find((leg) => leg.arrivalStop)?.arrivalStop;
+    const label = lines.length ? t('routeLine', { line: lines.join(' · ') }) : nameOf(result);
+    const tags = [
+      comparison.result?.cheapest.id === result.id && (
+        <span className="sc-tag-primary" key="cheapest">
+          {rankingLabel('cheapest')}
+        </span>
+      ),
+      comparison.result?.fastest.id === result.id && uniquelyBest(result, 'totalMinutes') && (
+        <span className="sc-tag-primary" key="fastest">
+          {t('fastest')}
+        </span>
+      ),
+      comparison.result?.shortest.id === result.id && uniquelyShortest(result) && (
+        <span className="sc-tag-primary" key="shortest">
+          {t('shortest')}
+        </span>
+      ),
+      comparison.result?.bestValue.id === result.id && (
+        <span className="sc-tag-quiet" key="best-value">
+          {rankingLabel('bestValue')}
+        </span>
+      ),
+      comparison.result?.fewestTransfers.id === result.id && uniquelyBest(result, 'transfers') && (
+        <span className="sc-tag-quiet" key="fewest-transfers">
+          {t('fewestTransfers')}
+        </span>
+      ),
+    ].filter(Boolean);
+    return { lines, departureStop, arrivalStop, label, tags };
+  };
 
   const renderResults = () => {
     const shownCards = cardResults.filter(
@@ -2853,53 +3037,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         {shownCards.length > 0 && (
           <ol className="sc-option-list">
             {shownCards.map((result) => {
-              const transitLegs = result.option.outbound.flatMap((leg) =>
-                leg.transit ? [leg.transit] : [],
-              );
-              const lines = [
-                ...new Set(
-                  transitLegs
-                    .map((leg) => leg.lineShortName || leg.lineName)
-                    .filter((line): line is string => Boolean(line)),
-                ),
-              ];
-              const departureStop = transitLegs.find((leg) => leg.departureStop)?.departureStop;
-              const arrivalStop = [...transitLegs]
-                .reverse()
-                .find((leg) => leg.arrivalStop)?.arrivalStop;
+              const { lines, departureStop, arrivalStop, label, tags } = describeCard(result);
               const isSelected = selected?.id === result.id;
-              const label = lines.length
-                ? t('routeLine', { line: lines.join(' · ') })
-                : nameOf(result);
-              const tags = [
-                comparison.result?.cheapest.id === result.id && (
-                  <span className="sc-tag-primary" key="cheapest">
-                    {rankingLabel('cheapest')}
-                  </span>
-                ),
-                comparison.result?.fastest.id === result.id &&
-                  uniquelyBest(result, 'totalMinutes') && (
-                    <span className="sc-tag-primary" key="fastest">
-                      {t('fastest')}
-                    </span>
-                  ),
-                comparison.result?.shortest.id === result.id && uniquelyShortest(result) && (
-                  <span className="sc-tag-primary" key="shortest">
-                    {t('shortest')}
-                  </span>
-                ),
-                comparison.result?.bestValue.id === result.id && (
-                  <span className="sc-tag-quiet" key="best-value">
-                    {rankingLabel('bestValue')}
-                  </span>
-                ),
-                comparison.result?.fewestTransfers.id === result.id &&
-                  uniquelyBest(result, 'transfers') && (
-                    <span className="sc-tag-quiet" key="fewest-transfers">
-                      {t('fewestTransfers')}
-                    </span>
-                  ),
-              ].filter(Boolean);
               return (
                 <li key={result.id} className={`sc-option ${isSelected ? 'is-selected' : ''}`}>
                   <button
@@ -3026,7 +3165,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 name: nameOf(comparison.result.bestValue),
               })}
             </p>
-            <button className="sc-text-button" onClick={() => setScreen('comparison')}>
+            <button className="sc-text-button" onClick={() => openScreen('comparison')}>
               {t('comparison')}
               <ArrowRight size={15} />
             </button>
@@ -3131,7 +3270,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           </div>
           <p className="sc-help">{t('timeValueExplanation')}</p>
           {hasFareRanges && <p className="sc-help">{t('fareRangeRankHelp')}</p>}
-          <button className="sc-primary-button" onClick={() => setScreen('breakdown')}>
+          <button className="sc-primary-button" onClick={() => openScreen('breakdown')}>
             {t('breakdown')}
             <ChevronRight size={16} />
           </button>
@@ -3512,6 +3651,778 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     </section>
   );
 
+  const renderBanners = () => (
+    <>
+      {!online && (
+        <p className="sc-connection-banner" role="status">
+          <WifiOff size={16} />
+          {t('offlineConnection')}
+        </p>
+      )}
+      {comparison.incompleteOptions.length > 0 && (
+        <section className="sc-connection-banner sc-incomplete-warning" role="alert">
+          <Info size={16} />
+          <div>
+            <p>{t('incompleteReturnNotice')}</p>
+            <ul>
+              {comparison.incompleteOptions.map((option) => (
+                <li key={option.id}>
+                  <strong>{nameOf(option)}</strong> — {t('returnWarning')}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+      {comparison.staleFareOptions.length > 0 && (
+        <section className="sc-connection-banner sc-incomplete-warning" role="alert">
+          <Info size={16} />
+          <div>
+            <p>{t('staleFareNotice')}</p>
+            <ul>
+              {comparison.staleFareOptions.map((option) => (
+                <li key={option.id}>
+                  <strong>{nameOf(option)}</strong>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+    </>
+  );
+
+  const renderRegistry = () => (
+    <section className="sc-page-content sc-registry">
+      <div className="sc-surface">
+        <h2>{t('sourceRegistry')}</h2>
+        {DATA_SOURCES.map((source) => (
+          <div className="sc-source-row" key={source.id}>
+            <div>
+              <strong>{source.name}</strong>
+              <p>{t('sourceReviewed', { date: source.verifiedOn, status: source.status })}</p>
+              {source.url && (
+                <a href={source.url} target="_blank" rel="noreferrer">
+                  {t('openOfficial')}
+                </a>
+              )}
+            </div>
+          </div>
+        ))}
+        <div className="sc-source-links">
+          <a href={`${import.meta.env.BASE_URL}privacy.html`}>{t('privacyPolicy')}</a>
+          <a href={`${import.meta.env.BASE_URL}terms.html`}>{t('termsOfUse')}</a>
+        </div>
+      </div>
+    </section>
+  );
+
+  // Phone layout: the map stays mounted; route, costs and reading pages open over it.
+  const pickingActive = mapDestinationPicking || mapStopoverPicking;
+  const layerDepth = isMobile ? pages.length + (pickingActive ? 1 : 0) : 0;
+  const historyDepth = useRef(
+    typeof window === 'undefined' ? 0 : historyLayer(window.history.state),
+  );
+  const pageOpeners = useRef<(HTMLElement | null)[]>([]);
+  const pageFocus = useRef<'page' | HTMLElement | null>(null);
+  const pageStackRef = useRef<HTMLDivElement>(null);
+  const sheetBodyId = `${plannerId}-sheet`;
+  const sheetDrag = useRef<{ y: number; dragged: boolean } | null>(null);
+  const sheetDragged = useRef(false);
+  // Screen changes across the phone breakpoint carry the open reading page over.
+  if (isMobile && screen !== 'planner') {
+    setScreen('planner');
+    setPages([screen]);
+  }
+  if (!isMobile && pages.length) {
+    const reading = pages.filter((page) => page !== 'route' && page !== 'costs');
+    setPages([]);
+    if (reading.length) setScreen(reading[reading.length - 1]!);
+  }
+  const [wasShortViewport, setWasShortViewport] = useState(shortViewport);
+  if (wasShortViewport !== shortViewport) {
+    setWasShortViewport(shortViewport);
+    if (shortViewport) setSheetOpen(false);
+  }
+  // An error belongs next to the options it affects, so the sheet opens to show it.
+  const [shownGoogleError, setShownGoogleError] = useState(googleError);
+  if (shownGoogleError !== googleError) {
+    setShownGoogleError(googleError);
+    if (googleError && isMobile) setSheetOpen(true);
+  }
+
+  const openScreen = (target: Exclude<Screen, 'planner'>) => {
+    if (isMobile) openPage(target);
+    else setScreen(target);
+  };
+  const cancelMapPick = () => {
+    stopoverPickCleanup.current?.();
+    stopoverPickCleanup.current = null;
+    setMapStopoverPicking(false);
+    setMapDestinationPicking(false);
+  };
+  const openPage = (page: MobilePage) => {
+    if (pages[pages.length - 1] === page) return;
+    if (pickingActive) cancelMapPick();
+    if (page === 'route')
+      routeDraft.current = {
+        fingerprint: liveQueryFingerprint,
+        origin: state.origin,
+        destination: state.destination,
+        leaveNow: state.leaveNow,
+        departure: state.departure,
+        returnTime: state.returnTime,
+        roundTrip: state.settings.roundTrip,
+        options: state.options,
+        googleResponse,
+        selectedId: selected?.id ?? selectedId,
+        editingMode,
+      };
+    // The cost page edits the option whose total it shows.
+    if (page === 'costs' && selected) setEditingMode(selected.mode);
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    pageOpeners.current = [...pageOpeners.current.slice(0, pages.length), opener];
+    pageFocus.current = 'page';
+    setPages([...pages, page]);
+  };
+  const restoreRouteDraft = (draft: RouteDraft) => {
+    if (draft.fingerprint !== liveQueryFingerprint) restoredFingerprint.current = draft.fingerprint;
+    setState((current) => ({
+      ...current,
+      origin: draft.origin,
+      destination: draft.destination,
+      leaveNow: draft.leaveNow,
+      departure: draft.departure,
+      returnTime: draft.returnTime,
+      settings: { ...current.settings, roundTrip: draft.roundTrip },
+      options: draft.options,
+    }));
+    setGoogleResponse(draft.googleResponse);
+    setSelectedId(draft.selectedId);
+    setEditingMode(draft.editingMode);
+  };
+  /** Closes map picking first, then pages from the top; an unconfirmed route edit is undone. */
+  const closeLayers = (count: number) => {
+    let remaining = count;
+    if (pickingActive && remaining > 0) {
+      cancelMapPick();
+      remaining -= 1;
+    }
+    if (remaining <= 0) return;
+    const kept = pages.slice(0, Math.max(0, pages.length - remaining));
+    if (pages.slice(kept.length).includes('route')) {
+      if (routeDraft.current) restoreRouteDraft(routeDraft.current);
+      routeDraft.current = null;
+      setStopoverSearchOpen(false);
+      setStopoverDraft({ label: '' });
+    }
+    pageFocus.current = pageOpeners.current[kept.length] ?? null;
+    pageOpeners.current = pageOpeners.current.slice(0, kept.length);
+    setPages(kept);
+  };
+  const closeLayersAction = useRef(closeLayers);
+  closeLayersAction.current = closeLayers;
+  // Each page or map pick has a history entry, so the system back button closes it first.
+  const goBack = () => {
+    if (historyDepth.current > 0) window.history.back();
+    else closeLayers(1);
+  };
+  const confirmRoute = () => {
+    routeDraft.current = null;
+    const mode = editingMode === 'transit' ? 'transit' : 'drive';
+    const planned =
+      Boolean(googleResponse) &&
+      lastRequestedQuery.current === activeQuery.current &&
+      lastRequestedMode.current === mode;
+    goBack();
+    if (googleMode && !planned) void getGoogleRoutes(mode);
+  };
+  useEffect(() => {
+    const current = historyDepth.current;
+    if (layerDepth > current) {
+      const base: unknown = window.history.state;
+      for (let layer = current + 1; layer <= layerDepth; layer += 1)
+        window.history.pushState(
+          { ...(base && typeof base === 'object' ? base : {}), [HISTORY_LAYER_KEY]: layer },
+          '',
+        );
+      historyDepth.current = layerDepth;
+    } else if (layerDepth < current) {
+      historyDepth.current = layerDepth;
+      window.history.go(layerDepth - current);
+    }
+  }, [layerDepth]);
+  useEffect(() => {
+    const onPopState = (event: PopStateEvent) => {
+      const layer = historyLayer(event.state);
+      const current = historyDepth.current;
+      if (layer === current) return;
+      // Forward navigation cannot reopen a closed page; step back to the current one.
+      if (layer > current) {
+        window.history.go(current - layer);
+        return;
+      }
+      historyDepth.current = layer;
+      closeLayersAction.current(current - layer);
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+  useEffect(() => {
+    const target = pageFocus.current;
+    pageFocus.current = null;
+    if (target === 'page') {
+      const open = pageStackRef.current?.querySelectorAll<HTMLElement>('.sc-page');
+      open?.[open.length - 1]?.focus();
+    } else if (target?.isConnected) target.focus();
+  }, [pages]);
+  useEffect(() => {
+    // Reattach the same map element when the layout switches; the map is never recreated.
+    if (googleMode && googleMapRef.current && mapElementRef.current)
+      googleMapRef.current.replaceChildren(mapElementRef.current);
+  }, [isMobile, googleMode]);
+
+  const cardLabel = (result: RouteResult) => describeCard(result).label;
+  const sheetCards = cardResults.filter(
+    (result, index) => !googleMode || showAllRoutes || index < 3 || result.id === selected?.id,
+  );
+  const hasDestination = Boolean(state.destination.label.trim());
+  const routeConfirmBlocked =
+    googleMode &&
+    (googleStatus !== 'ready' ||
+      comparison.error ||
+      stopoverRoutingBlocked ||
+      departureInvalid ||
+      returnTimeMissing);
+
+  const renderRouteCard = () => (
+    <div className="sc-mobile-top">
+      <button className="sc-route-card" onClick={() => openPage('route')}>
+        <span className="sc-visually-hidden">{t('mobileEditRoute')}: </span>
+        {hasDestination ? (
+          <>
+            <span className="sc-route-card-places">
+              <span>{shortPlace(state.origin.label) || t('origin')}</span>
+              <ArrowRight size={14} aria-hidden="true" />
+              <strong>{shortPlace(state.destination.label)}</strong>
+            </span>
+            <span className="sc-route-card-meta">
+              {[
+                t(selected?.mode ?? editingMode),
+                state.leaveNow || departureAt === undefined
+                  ? t('leaveNow')
+                  : aucklandClock.format(departureAt),
+                tripScope,
+              ].join(' · ')}
+            </span>
+          </>
+        ) : (
+          <span className="sc-route-card-empty">
+            <MapPin size={17} aria-hidden="true" />
+            {t('mobileWhereTo')}
+          </span>
+        )}
+      </button>
+      <button
+        className="sc-map-button"
+        aria-label={t('settings')}
+        onClick={() => openPage('settings')}
+      >
+        <SettingsIcon size={20} />
+      </button>
+    </div>
+  );
+
+  const renderMapTools = () => (
+    <div className="sc-map-fabs" role="group" aria-label={t('mobileMapTools')}>
+      <button
+        className="sc-map-button"
+        aria-label={t(locationLoading ? 'locating' : 'useLocation')}
+        onClick={useLocation}
+        disabled={locationLoading}
+      >
+        <LocateFixed size={20} />
+      </button>
+      {googleMode && (
+        <button
+          className="sc-map-button"
+          aria-label={t('pickDestinationOnMap')}
+          onClick={beginMapDestinationPick}
+          disabled={googleStatus !== 'ready'}
+        >
+          <MapPin size={20} />
+        </button>
+      )}
+      <button
+        className="sc-map-button"
+        aria-label={t('weatherTitle')}
+        aria-expanded={weatherOpen}
+        onClick={() => setWeatherOpen((open) => !open)}
+      >
+        <CloudSun size={20} />
+      </button>
+    </div>
+  );
+
+  const renderPickBar = () => (
+    <div className="sc-mobile-top sc-mobile-pick" role="status">
+      <span>{t(mapDestinationPicking ? 'pickDestinationHint' : 'pickStopoverHint')}</span>
+      <button className="sc-small-button" onClick={goBack}>
+        <X size={15} />
+        {t(mapDestinationPicking ? 'cancelDestinationPick' : 'cancelStopoverPick')}
+      </button>
+    </div>
+  );
+
+  const renderSheetSummary = () => {
+    if (googleMode && googleStatus === 'routes')
+      return (
+        <p className="sc-sheet-status" role="status">
+          <span className="sc-spinner" aria-hidden="true" />
+          {t('googleRoutesLoading')}
+        </p>
+      );
+    if (selected)
+      return (
+        <div className="sc-sheet-selected">
+          <span className="sc-sheet-name">
+            <ModeIcon mode={selected.mode} size={16} />
+            <span>{cardLabel(selected)}</span>
+          </span>
+          <strong
+            key={valueUpdates}
+            className={`sc-sheet-cost ${selected.totalCostRange ? 'sc-sheet-cost-range' : ''} ${valueUpdates ? 'sc-value-updated' : ''}`}
+            data-testid="selected-cost"
+          >
+            {moneyWithRange(selected.totalCost, selected.totalCostRange)}
+          </strong>
+          <span className="sc-sheet-meta">
+            <span>{tripScope}</span>
+            {` · ${wholeMinutes(selected.totalMinutes)}`}
+            {departureAt !== undefined &&
+              ` · ${clockSpan(departureAt, selected.breakdown.outbound.totalMinutes)}`}
+          </span>
+          <span className="sc-sheet-source">
+            {[
+              resultSource(selected),
+              selected.totalCostRange ? t('fareRangeBadge') : '',
+              selected.warnings.includes('unverified-parking') ? t('parkingWarning') : '',
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </span>
+        </div>
+      );
+    return (
+      <div className="sc-sheet-empty">
+        <strong>
+          {!hasDestination
+            ? t('mobileWhereTo')
+            : comparison.error
+              ? t('mobileFixInputs')
+              : googleMode
+                ? t('planRoutePrompt')
+                : t(noComparableRoutesKey)}
+        </strong>
+        {!hasDestination && <p>{t('mobilePlanPrompt')}</p>}
+        <div className="sc-sheet-empty-actions">
+          {hasDestination && googleMode && !comparison.error ? (
+            <>
+              <button
+                className="sc-primary-button"
+                onClick={() =>
+                  void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')
+                }
+                disabled={routeConfirmBlocked}
+              >
+                <Route size={16} />
+                {t('planRoute')}
+              </button>
+              <button className="sc-small-button" onClick={() => openPage('route')}>
+                {t('mobileEditRoute')}
+              </button>
+            </>
+          ) : (
+            <button className="sc-primary-button" onClick={() => openPage('route')}>
+              <MapPin size={16} />
+              {t(hasDestination ? 'mobileEditRoute' : 'mobileChooseDestination')}
+            </button>
+          )}
+          {googleMode && (
+            <button className="sc-text-button" onClick={() => setManualRequested(true)}>
+              {t('useManualInputs')}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderSheetCards = () => (
+    <ol className="sc-option-list sc-sheet-options">
+      {sheetCards.map((result) => {
+        const { label, tags } = describeCard(result);
+        const isSelected = selected?.id === result.id;
+        return (
+          <li key={result.id} className={`sc-option ${isSelected ? 'is-selected' : ''}`}>
+            <button
+              className="sc-result-card sc-sheet-card"
+              onClick={() => selectResult(result)}
+              aria-pressed={isSelected}
+              data-testid={`route-card-${result.id}`}
+            >
+              <span className="sc-result-radio" aria-hidden="true" />
+              <span className="sc-result-main">
+                <span className="sc-result-name">{label}</span>
+                <span className="sc-result-meta">
+                  {[
+                    wholeMinutes(result.totalMinutes),
+                    distanceText(result),
+                    t('transferCount', { count: result.transfers }),
+                  ].join(' · ')}
+                </span>
+                {!sharedSheetSource && (
+                  <span className="sc-result-source">{resultSource(result)}</span>
+                )}
+                {tags.length > 0 && <span className="sc-result-tags">{tags}</span>}
+              </span>
+              <span
+                className={`sc-money ${result.totalCostRange ? 'sc-money-range' : ''}`}
+                data-testid={`cost-${result.id}`}
+              >
+                {moneyWithRange(result.totalCost, result.totalCostRange)}
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ol>
+  );
+  const sheetSources = new Set(sheetCards.map(resultSource));
+  const sharedSheetSource = sheetSources.size === 1 ? [...sheetSources][0] : '';
+
+  // Before there is anything to compare, the sheet is a short prompt with nothing to expand.
+  const sheetExpandable = Boolean(comparison.result);
+  const sheetNotices =
+    !online ||
+    comparison.incompleteOptions.length > 0 ||
+    comparison.staleFareOptions.length > 0 ||
+    Boolean(googleMode && googleError) ||
+    locationError ||
+    Boolean(props.googleApiKey && !googleMode) ||
+    comparison.error;
+  const renderSheet = () => (
+    <section className="sc-sheet" aria-label={t('mobileSheetLabel')}>
+      {sheetExpandable && (
+        <div
+          className="sc-sheet-grip"
+          aria-hidden="true"
+          onPointerDown={(event) => {
+            sheetDrag.current = { y: event.clientY, dragged: false };
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+          }}
+          onPointerMove={(event) => {
+            const drag = sheetDrag.current;
+            if (drag && Math.abs(event.clientY - drag.y) > 8) drag.dragged = true;
+          }}
+          onPointerUp={(event) => {
+            const drag = sheetDrag.current;
+            sheetDrag.current = null;
+            if (!drag?.dragged) return;
+            sheetDragged.current = true;
+            const distance = event.clientY - drag.y;
+            if (Math.abs(distance) > 24) setSheetOpen(distance < 0);
+          }}
+          onPointerCancel={() => {
+            sheetDrag.current = null;
+          }}
+          onClick={() => {
+            if (sheetDragged.current) sheetDragged.current = false;
+            else setSheetOpen((open) => !open);
+          }}
+        >
+          <span />
+        </div>
+      )}
+      <div className="sc-sheet-head">
+        {renderSheetSummary()}
+        {sheetExpandable && (
+          <button
+            className="sc-icon-button sc-sheet-toggle"
+            aria-expanded={sheetOpen}
+            aria-controls={sheetBodyId}
+            aria-label={t(sheetOpen ? 'mobileCollapseSheet' : 'mobileExpandSheet')}
+            onClick={() => setSheetOpen((open) => !open)}
+          >
+            <ChevronDown size={20} />
+          </button>
+        )}
+      </div>
+      {(sheetExpandable || sheetNotices) && (
+        <div id={sheetBodyId} className="sc-sheet-body" hidden={sheetExpandable && !sheetOpen}>
+          {renderBanners()}
+          {googleMode && googleError && (
+            <p className="sc-error" role="alert">
+              {googleError}
+            </p>
+          )}
+          {locationError && (
+            <p role="alert" className="sc-error">
+              {t('locationFailed')}
+            </p>
+          )}
+          {comparison.error && (
+            <div className="sc-empty-state" role="alert">
+              <h3>{t('validationSummary')}</h3>
+              <p>{t('noResults')}</p>
+            </div>
+          )}
+          {sheetCards.length > 0 && (
+            <>
+              <div className="sc-sheet-list-head">
+                <h2>{t('yourOptions')}</h2>
+                {(comparison.result?.results.length ?? 0) > 1 && (
+                  <label className="sc-sheet-sort">
+                    <span>{t('sortBy')}</span>
+                    <select
+                      value={sortBy}
+                      onChange={(event) => setSortBy(event.target.value as typeof sortBy)}
+                    >
+                      <option value="cost">{t('sortCost')}</option>
+                      <option value="time">{t('sortTime')}</option>
+                      <option value="distance">{t('sortDistance')}</option>
+                      <option value="value">{t('sortValue')}</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+              {renderSheetCards()}
+            </>
+          )}
+          {googleMode && (comparison.result?.results.length ?? 0) > 3 && (
+            <button
+              className="sc-show-routes"
+              onClick={() => setShowAllRoutes((current) => !current)}
+              aria-expanded={showAllRoutes}
+            >
+              {t(showAllRoutes ? 'showFewerRoutes' : 'showAllRoutes', {
+                count: comparison.result!.results.length,
+              })}
+              <ChevronDown size={16} />
+            </button>
+          )}
+          {sheetExpandable && (
+            <div className="sc-sheet-actions">
+              <button className="sc-small-button" onClick={() => openPage('comparison')}>
+                {t('mobileCompareAll')}
+              </button>
+              <button className="sc-small-button" onClick={() => openPage('breakdown')}>
+                {t('breakdown')}
+              </button>
+              <button className="sc-small-button" onClick={() => openPage('costs')}>
+                {t('adjustCosts')}
+              </button>
+            </div>
+          )}
+          {/* Mode and data notices follow the options, which come first on a small screen. */}
+          {!googleMode && (
+            <div className="sc-demo-banner">
+              <span className="sc-tag">{t('demoData')}</span>
+              <p>{t('demoNotice')}</p>
+            </div>
+          )}
+          {renderManualFallback()}
+          {sheetCards.length > 0 && (
+            <div className="sc-results-notes">
+              {sharedSheetSource && <p>{t('sharedSource', { source: sharedSheetSource })}</p>}
+              {sheetCards.some(
+                (result) =>
+                  result.mode === 'drive' && result.warnings.includes('unverified-parking'),
+              ) && <p>{t('drivingParkingNote')}</p>}
+              {hasFareRanges && <p>{t('fareRangeRankHelp')}</p>}
+            </div>
+          )}
+          {renderGoogleAttribution()}
+          {googleMode && sheetExpandable && (
+            <button className="sc-text-button" onClick={() => setManualRequested(true)}>
+              {t('useManualInputs')}
+            </button>
+          )}
+          {!googleMode && <p className="sc-help">{t('estimatedReturn')}</p>}
+        </div>
+      )}
+    </section>
+  );
+
+  const renderPageContent = (page: MobilePage) => {
+    switch (page) {
+      case 'route':
+        return (
+          <div className="sc-input-panel" aria-labelledby={`${plannerId}-journey`}>
+            {renderLocationSection()}
+            {renderScheduleSection()}
+            {googleMode && (
+              <section className="sc-input-section">
+                <h3 className="sc-section-label">{t('chooseMode')}</h3>
+                {renderModeSwitch()}
+                {renderRoutingActions(false)}
+              </section>
+            )}
+          </div>
+        );
+      case 'costs':
+        return (
+          <div className="sc-input-panel">
+            <section className="sc-input-section">
+              {!googleMode && (
+                <>
+                  <h3 className="sc-section-label">{t('chooseMode')}</h3>
+                  {renderModeSwitch()}
+                </>
+              )}
+              <div className="sc-mode-editor">{renderCostEditors()}</div>
+            </section>
+            <p className="sc-help sc-return-note">
+              {t('mobileCostsLive')} {!googleMode && t('estimatedReturn')}
+            </p>
+          </div>
+        );
+      case 'comparison':
+        return (
+          <>
+            {renderComparison()}
+            {renderGoogleAttribution()}
+          </>
+        );
+      case 'breakdown':
+        return (
+          <>
+            {renderBreakdown()}
+            {renderGoogleAttribution()}
+          </>
+        );
+      case 'settings':
+        return (
+          <>
+            {renderSettings()}
+            <section className="sc-page-content">
+              <button className="sc-small-button sc-full-width" onClick={() => openPage('about')}>
+                {t('about')}
+                <ChevronRight size={16} />
+              </button>
+            </section>
+          </>
+        );
+      case 'about':
+        return (
+          <>
+            {renderAbout()}
+            {renderRegistry()}
+            <p className="sc-page-content sc-help">{t('footer')}</p>
+          </>
+        );
+    }
+  };
+
+  const renderPageFooter = (page: MobilePage) =>
+    page === 'route' ? (
+      <footer className="sc-page-footer">
+        <button
+          className="sc-primary-button sc-full-width"
+          onClick={confirmRoute}
+          disabled={routeConfirmBlocked}
+        >
+          {googleMode && <Route size={16} />}
+          {t(googleMode ? 'planRoute' : 'mobileDone')}
+        </button>
+      </footer>
+    ) : page === 'costs' ? (
+      <footer className="sc-page-footer sc-cost-footer">
+        {selected && (
+          <span className="sc-cost-footer-total">
+            <span>{cardLabel(selected)}</span>
+            <strong>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</strong>
+            <span>{tripScope}</span>
+          </span>
+        )}
+        <button className="sc-primary-button" onClick={goBack}>
+          {t('mobileDone')}
+        </button>
+      </footer>
+    ) : null;
+
+  const pageTitles: Record<MobilePage, MessageKey> = {
+    route: 'mobileEditRoute',
+    costs: 'adjustCosts',
+    comparison: 'comparison',
+    breakdown: 'breakdown',
+    settings: 'settings',
+    about: 'about',
+  };
+  const renderPage = (page: MobilePage, index: number) => {
+    const covered = index < pages.length - 1 || pickingActive;
+    const titleId = `${plannerId}-page-${page}`;
+    // Reading pages carry their own heading; the bar title then only names the page.
+    const Title = page === 'route' || page === 'costs' ? 'h1' : 'p';
+    return (
+      <section
+        key={page}
+        className={`sc-page ${covered ? 'is-covered' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        inert={covered}
+        data-page={page}
+      >
+        <header className="sc-page-bar">
+          <button
+            className="sc-icon-button"
+            aria-label={t(page === 'route' ? 'mobileDiscardRoute' : 'mobileBack')}
+            onClick={goBack}
+          >
+            <ArrowLeft size={20} />
+          </button>
+          <Title id={titleId} className="sc-page-bar-title">
+            {t(pageTitles[page])}
+          </Title>
+        </header>
+        <div className="sc-page-body">{renderPageContent(page)}</div>
+        {renderPageFooter(page)}
+      </section>
+    );
+  };
+
+  const renderMobileShell = () => {
+    const pageShown = pages.length > 0 && !pickingActive;
+    return (
+      <main className="sc-mobile-shell">
+        <div className="sc-mobile-main" inert={pageShown} aria-hidden={pageShown || undefined}>
+          <div className="sc-mobile-map">
+            {renderSchematic(true)}
+            {pickingActive ? renderPickBar() : renderRouteCard()}
+            {!pickingActive && renderMapTools()}
+            {weatherOpen && !pickingActive && (
+              <div className="sc-mobile-weather">
+                <WeatherBar
+                  state={weather}
+                  locale={locale}
+                  originLabel={shortPlace(state.origin.label)}
+                />
+              </div>
+            )}
+          </div>
+          {renderSheet()}
+        </div>
+        {pages.length > 0 && (
+          <div className="sc-page-stack" ref={pageStackRef}>
+            {pages.map(renderPage)}
+          </div>
+        )}
+      </main>
+    );
+  };
+
   const tabs: { key: Screen; label: MessageKey }[] = [
     { key: 'planner', label: 'planner' },
     { key: 'comparison', label: 'comparison' },
@@ -3520,195 +4431,148 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     { key: 'about', label: 'about' },
   ];
   return (
-    <div className={`smart-commute sc-theme-${theme}`} lang={locale}>
-      <header className="sc-header">
-        <a
-          className="sc-brand"
-          href="#"
-          onClick={(event) => {
-            event.preventDefault();
-            setScreen('planner');
-          }}
-        >
-          <span className="sc-brand-symbol" aria-hidden="true">
-            <Route size={18} />
-          </span>
-          <span className="sc-brand-text">
-            <strong>
-              {t('appName')}
-              <span className="sc-brand-nz">NZ</span>
-            </strong>
-            <small>{t('region')}</small>
-          </span>
-        </a>
-        <div className="sc-header-actions">
-          <span className="sc-header-status">
-            <span className="sc-status-dot" aria-hidden="true" />
-            {t(googleMode ? 'googleOnline' : 'manualMode')}
-          </span>
-          <select
-            aria-label={t('language')}
-            value={locale}
-            onChange={(event) => setLocale(event.target.value as Locale)}
-          >
-            <option value="en">EN</option>
-            <option value="zh-CN">简体中文</option>
-          </select>
-          <button
-            className="sc-icon-button"
-            aria-label={t(theme === 'light' ? 'dark' : 'light')}
-            onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-          >
-            {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
-          </button>
-        </div>
-      </header>
-      <nav className="sc-navigation" role="tablist" aria-label={t('appName')}>
-        {tabs.map((tab, index) => (
-          <button
-            key={tab.key}
-            role="tab"
-            aria-selected={screen === tab.key}
-            aria-controls={`${plannerId}-screen`}
-            id={`${plannerId}-tab-${tab.key}`}
-            tabIndex={screen === tab.key ? 0 : -1}
-            className={screen === tab.key ? 'is-active' : ''}
-            onClick={() => setScreen(tab.key)}
-            onKeyDown={(event) => {
-              const next =
-                event.key === 'ArrowRight'
-                  ? (index + 1) % tabs.length
-                  : event.key === 'ArrowLeft'
-                    ? (index + tabs.length - 1) % tabs.length
-                    : event.key === 'Home'
-                      ? 0
-                      : event.key === 'End'
-                        ? tabs.length - 1
-                        : null;
-              if (next === null) return;
+    <div className={`smart-commute sc-theme-${theme} ${isMobile ? 'sc-mobile' : ''}`} lang={locale}>
+      {!isMobile && (
+        <header className="sc-header">
+          <a
+            className="sc-brand"
+            href="#"
+            onClick={(event) => {
               event.preventDefault();
-              setScreen(tabs[next].key);
-              const buttons =
-                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
-                  '[role="tab"]',
-                );
-              buttons?.[next]?.focus();
+              setScreen('planner');
             }}
           >
-            {t(tab.label)}
-          </button>
-        ))}
-      </nav>
-      <main
-        id={`${plannerId}-screen`}
-        role="tabpanel"
-        aria-labelledby={`${plannerId}-tab-${screen}`}
-        tabIndex={0}
-      >
-        {!online && (
-          <p className="sc-connection-banner" role="status">
-            <WifiOff size={16} />
-            {t('offlineConnection')}
-          </p>
-        )}
-        {comparison.incompleteOptions.length > 0 && (
-          <section className="sc-connection-banner sc-incomplete-warning" role="alert">
-            <Info size={16} />
-            <div>
-              <p>{t('incompleteReturnNotice')}</p>
-              <ul>
-                {comparison.incompleteOptions.map((option) => (
-                  <li key={option.id}>
-                    <strong>{nameOf(option)}</strong> — {t('returnWarning')}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </section>
-        )}
-        {comparison.staleFareOptions.length > 0 && (
-          <section className="sc-connection-banner sc-incomplete-warning" role="alert">
-            <Info size={16} />
-            <div>
-              <p>{t('staleFareNotice')}</p>
-              <ul>
-                {comparison.staleFareOptions.map((option) => (
-                  <li key={option.id}>
-                    <strong>{nameOf(option)}</strong>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </section>
-        )}
-        {screen === 'planner' && (
-          <div className="sc-workspace">
-            <div className="sc-plan-column">
-              <section className="sc-planner-intro">
-                <h1>{t('headline')}</h1>
-                <p>{t('subheadline')}</p>
-                {!googleMode && (
-                  <div className="sc-demo-banner">
-                    <span className="sc-tag">{t('demoData')}</span>
-                    <p>{t('demoNotice')}</p>
-                  </div>
-                )}
-              </section>
-              {renderInputs()}
-              {renderResults()}
-              {renderGoogleAttribution()}
-              {selected && !summaryInView && (
-                <div className="sc-selected-bar">
-                  <span className="sc-selected-bar-text">
-                    <span>{nameOf(selected)}</span>
-                    <strong>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</strong>
-                    <span>
-                      {tripScope} · {t('minutes', { count: shortNumber(selected.totalMinutes) })}
-                    </span>
-                  </span>
-                  <button className="sc-small-button" onClick={showResults}>
-                    {t('viewOptions')}
-                  </button>
-                </div>
-              )}
-            </div>
-            {renderSchematic()}
+            <span className="sc-brand-symbol" aria-hidden="true">
+              <Route size={18} />
+            </span>
+            <span className="sc-brand-text">
+              <strong>
+                {t('appName')}
+                <span className="sc-brand-nz">NZ</span>
+              </strong>
+              <small>{t('region')}</small>
+            </span>
+          </a>
+          <div className="sc-header-actions">
+            <span className="sc-header-status">
+              <span className="sc-status-dot" aria-hidden="true" />
+              {t(googleMode ? 'googleOnline' : 'manualMode')}
+            </span>
+            <select
+              aria-label={t('language')}
+              value={locale}
+              onChange={(event) => setLocale(event.target.value as Locale)}
+            >
+              <option value="en">EN</option>
+              <option value="zh-CN">简体中文</option>
+            </select>
+            <button
+              className="sc-icon-button"
+              aria-label={t(theme === 'light' ? 'dark' : 'light')}
+              onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
+            >
+              {theme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
+            </button>
           </div>
-        )}
-        {screen === 'comparison' && renderComparison()}
-        {screen === 'breakdown' && renderBreakdown()}
-        {screen === 'settings' && renderSettings()}
-        {screen === 'about' && renderAbout()}
-        {screen !== 'planner' && renderGoogleAttribution()}
-        {screen === 'about' && (
-          <section className="sc-page-content sc-registry">
-            <div className="sc-surface">
-              <h2>{t('sourceRegistry')}</h2>
-              {DATA_SOURCES.map((source) => (
-                <div className="sc-source-row" key={source.id}>
-                  <div>
-                    <strong>{source.name}</strong>
-                    <p>{t('sourceReviewed', { date: source.verifiedOn, status: source.status })}</p>
-                    {source.url && (
-                      <a href={source.url} target="_blank" rel="noreferrer">
-                        {t('openOfficial')}
-                      </a>
+        </header>
+      )}
+      {isMobile ? (
+        renderMobileShell()
+      ) : (
+        <>
+          <nav className="sc-navigation" role="tablist" aria-label={t('appName')}>
+            {tabs.map((tab, index) => (
+              <button
+                key={tab.key}
+                role="tab"
+                aria-selected={screen === tab.key}
+                aria-controls={`${plannerId}-screen`}
+                id={`${plannerId}-tab-${tab.key}`}
+                tabIndex={screen === tab.key ? 0 : -1}
+                className={screen === tab.key ? 'is-active' : ''}
+                onClick={() => setScreen(tab.key)}
+                onKeyDown={(event) => {
+                  const next =
+                    event.key === 'ArrowRight'
+                      ? (index + 1) % tabs.length
+                      : event.key === 'ArrowLeft'
+                        ? (index + tabs.length - 1) % tabs.length
+                        : event.key === 'Home'
+                          ? 0
+                          : event.key === 'End'
+                            ? tabs.length - 1
+                            : null;
+                  if (next === null) return;
+                  event.preventDefault();
+                  setScreen(tabs[next].key);
+                  const buttons =
+                    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                      '[role="tab"]',
+                    );
+                  buttons?.[next]?.focus();
+                }}
+              >
+                {t(tab.label)}
+              </button>
+            ))}
+          </nav>
+          <main
+            id={`${plannerId}-screen`}
+            role="tabpanel"
+            aria-labelledby={`${plannerId}-tab-${screen}`}
+            tabIndex={0}
+          >
+            {renderBanners()}
+            {screen === 'planner' && (
+              <div className="sc-workspace">
+                <div className="sc-plan-column">
+                  <section className="sc-planner-intro">
+                    <h1>{t('headline')}</h1>
+                    <p>{t('subheadline')}</p>
+                    {!googleMode && (
+                      <div className="sc-demo-banner">
+                        <span className="sc-tag">{t('demoData')}</span>
+                        <p>{t('demoNotice')}</p>
+                      </div>
                     )}
-                  </div>
+                  </section>
+                  {renderInputs()}
+                  {renderResults()}
+                  {renderGoogleAttribution()}
+                  {selected && !summaryInView && (
+                    <div className="sc-selected-bar">
+                      <span className="sc-selected-bar-text">
+                        <span>{nameOf(selected)}</span>
+                        <strong>
+                          {moneyWithRange(selected.totalCost, selected.totalCostRange)}
+                        </strong>
+                        <span>
+                          {tripScope} ·{' '}
+                          {t('minutes', { count: shortNumber(selected.totalMinutes) })}
+                        </span>
+                      </span>
+                      <button className="sc-small-button" onClick={showResults}>
+                        {t('viewOptions')}
+                      </button>
+                    </div>
+                  )}
                 </div>
-              ))}
-              <div className="sc-source-links">
-                <a href={`${import.meta.env.BASE_URL}privacy.html`}>{t('privacyPolicy')}</a>
-                <a href={`${import.meta.env.BASE_URL}terms.html`}>{t('termsOfUse')}</a>
+                {renderSchematic()}
               </div>
-            </div>
-          </section>
-        )}
-      </main>
-      <footer className="sc-footer">
-        <span>{t('footer')}</span>
-        <span>{t(googleMode ? 'googleDetails' : 'offlineStatus')}</span>
-      </footer>
+            )}
+            {screen === 'comparison' && renderComparison()}
+            {screen === 'breakdown' && renderBreakdown()}
+            {screen === 'settings' && renderSettings()}
+            {screen === 'about' && renderAbout()}
+            {screen !== 'planner' && renderGoogleAttribution()}
+            {screen === 'about' && renderRegistry()}
+          </main>
+          <footer className="sc-footer">
+            <span>{t('footer')}</span>
+            <span>{t(googleMode ? 'googleDetails' : 'offlineStatus')}</span>
+          </footer>
+        </>
+      )}
       {notice && (
         <div className="sc-toast" role="status">
           <Check size={16} />

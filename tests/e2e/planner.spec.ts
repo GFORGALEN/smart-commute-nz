@@ -5,9 +5,41 @@ async function openPlanner(page: Page): Promise<void> {
   await expect(page.getByTestId('route-card-drive')).toBeVisible();
 }
 
-async function showInputs(page: Page): Promise<void> {
-  const toggle = page.getByRole('button', { name: 'Edit journey inputs', exact: true });
-  if (await toggle.isVisible()) await toggle.click();
+/** Phones show a map first; their route and cost inputs open as separate pages. */
+async function isPhone(page: Page): Promise<boolean> {
+  return (await page.locator('.smart-commute.sc-mobile').count()) > 0;
+}
+
+async function closePages(page: Page): Promise<void> {
+  for (let open = await page.getByRole('dialog').count(); open > 0; open -= 1) {
+    const dialog = page.getByRole('dialog');
+    // The route page keeps edits only when confirmed; every other page closes with Back.
+    if ((await dialog.getAttribute('data-page')) === 'route')
+      await dialog.getByRole('button', { name: 'Done', exact: true }).click();
+    else await dialog.getByRole('button', { name: 'Back', exact: true }).click();
+    await expect(page.getByRole('dialog')).toHaveCount(open - 1);
+  }
+}
+
+async function editRoute(page: Page): Promise<void> {
+  if (!(await isPhone(page))) return;
+  await closePages(page);
+  await page.getByRole('button', { name: /^Edit route:/ }).click();
+}
+
+async function confirmRoute(page: Page): Promise<void> {
+  if (!(await isPhone(page))) return;
+  await page
+    .getByRole('dialog', { name: 'Edit route' })
+    .getByRole('button', { name: 'Done', exact: true })
+    .click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+}
+
+async function editCosts(page: Page): Promise<void> {
+  if (!(await isPhone(page))) return;
+  await closePages(page);
+  await page.getByRole('button', { name: 'Adjust fares and costs', exact: true }).click();
 }
 
 async function showRouteDetails(page: Page, editor: string): Promise<void> {
@@ -19,7 +51,20 @@ async function showRouteDetails(page: Page, editor: string): Promise<void> {
 }
 
 async function navigate(page: Page, name: string): Promise<void> {
-  await page.getByRole('tablist').getByRole('tab', { name, exact: true }).click();
+  if (!(await isPhone(page))) {
+    await page.getByRole('tablist').getByRole('tab', { name, exact: true }).click();
+    return;
+  }
+  await closePages(page);
+  if (name === 'Planner') return;
+  if (name === 'Settings' || name === 'About & sources') {
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    if (name === 'About & sources')
+      await page.getByRole('button', { name: 'About & sources', exact: true }).click();
+    return;
+  }
+  const entry = name === 'Comparison' ? 'Compare all' : name;
+  await page.getByRole('button', { name: entry, exact: true }).click();
 }
 
 test('no API key: all three editable manual routes compare with disclosed assumptions', async ({
@@ -60,7 +105,7 @@ test('independent public transport fares change the daily price and cheapest cho
   page,
 }) => {
   await openPlanner(page);
-  await showInputs(page);
+  await editCosts(page);
   await page.getByRole('button', { name: 'Public transport', exact: true }).click();
   const editor = page.getByTestId('route-editor-transit');
   await editor.getByLabel('Public transport fare — outbound', { exact: true }).fill('1');
@@ -73,10 +118,12 @@ test('verified AT zones apply independent static fares with transparent provenan
   page,
 }) => {
   await openPlanner(page);
-  await showInputs(page);
+  await editRoute(page);
   await page.getByLabel('Leave now', { exact: true }).uncheck();
   await page.getByLabel('Departure time', { exact: true }).fill('2026-10-09T10:00');
   await page.getByLabel('Return time', { exact: true }).fill('2026-10-09T17:00');
+  await confirmRoute(page);
+  await editCosts(page);
   await page.getByRole('button', { name: 'Public transport', exact: true }).click();
   const editor = page.getByTestId('route-editor-transit');
   const helper = page.getByTestId('at-fare-helper-transit');
@@ -114,16 +161,20 @@ test('outbound and return use different distances and parking is charged once', 
   page,
 }) => {
   await openPlanner(page);
-  await showInputs(page);
+  await editCosts(page);
   const editor = page.getByTestId('route-editor-drive');
   await editor.getByLabel('Outbound distance (km)', { exact: true }).fill('10');
   await editor.getByLabel('Return distance (km)', { exact: true }).fill('30');
   await editor.getByLabel('Parking per commute (NZ$)', { exact: true }).fill('12');
   await expect(page.getByTestId('route-card-drive')).toContainText('26.68');
+  await editRoute(page);
   await page.getByLabel('Include the return journey', { exact: true }).uncheck();
+  await confirmRoute(page);
   await expect(page.getByTestId('route-card-drive')).toContainText('15.67');
   await expect(page.getByText('one way', { exact: true })).toBeVisible();
+  await editRoute(page);
   await page.getByLabel('Include the return journey', { exact: true }).check();
+  await confirmRoute(page);
   await expect(page.getByTestId('route-card-drive')).toContainText('26.68');
 });
 
@@ -131,7 +182,7 @@ test('a waypoint is saved as a manual preference without fabricating a new dista
   page,
 }) => {
   await openPlanner(page);
-  await showInputs(page);
+  await editCosts(page);
   await showRouteDetails(page, 'route-editor-drive');
   await page
     .getByPlaceholder('Add a stop, station or via point', { exact: true })
@@ -146,14 +197,14 @@ test('a waypoint is saved as a manual preference without fabricating a new dista
   ).toBeVisible();
   await expect(page.getByTestId('route-card-drive')).toContainText('13.95');
   await page.reload();
-  await showInputs(page);
+  await editCosts(page);
   await showRouteDetails(page, 'route-editor-drive');
   await expect(page.getByText('Panmure station', { exact: true })).toBeVisible();
 });
 
 test('edited locations and saved-place actions survive reload', async ({ page }) => {
   await openPlanner(page);
-  await showInputs(page);
+  await editRoute(page);
   const origin = 'Manual origin, Auckland';
   const destination = 'Manual destination, Auckland';
   await page.getByLabel('Starting point', { exact: true }).fill(origin);
@@ -161,8 +212,9 @@ test('edited locations and saved-place actions survive reload', async ({ page })
   await page.getByLabel('Destination', { exact: true }).fill(destination);
   await page.getByRole('button', { name: 'Save destination', exact: true }).click();
   await expect(page.getByTestId('route-card-drive')).toContainText('13.95');
+  await confirmRoute(page);
   await page.reload();
-  await showInputs(page);
+  await editRoute(page);
   await expect(page.getByLabel('Starting point', { exact: true })).toHaveValue(origin);
   await expect(page.getByLabel('Destination', { exact: true })).toHaveValue(destination);
   await page
@@ -179,6 +231,17 @@ test('edited locations and saved-place actions survive reload', async ({ page })
 
 test('Chinese navigation and planner labels follow the language selection', async ({ page }) => {
   await openPlanner(page);
+  if (await isPhone(page)) {
+    // Phones keep language with the other settings, behind the button beside the route card.
+    await navigate(page, 'Settings');
+    await page.getByRole('combobox', { name: 'Language', exact: true }).selectOption('zh-CN');
+    await expect(page.getByRole('dialog', { name: '设置', exact: true })).toBeVisible();
+    await expect(page.getByRole('combobox', { name: '语言', exact: true })).toHaveValue('zh-CN');
+    await page.getByRole('button', { name: '返回', exact: true }).click();
+    await expect(page.getByRole('button', { name: /^编辑路线:/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: '详细比较', exact: true })).toBeVisible();
+    return;
+  }
   await page.getByLabel('Language', { exact: true }).selectOption('zh-CN');
   await expect(
     page.getByRole('tablist').getByRole('tab', { name: '方案比较', exact: true }),
@@ -219,8 +282,67 @@ test('planner, comparison, breakdown and settings fit the device width', async (
       dimensions.viewport + 1,
     );
     expect(dimensions.body, `${name} body width`).toBeLessThanOrEqual(dimensions.viewport + 1);
-    await expect(page.getByRole('tablist')).toBeVisible();
+    if (!(await isPhone(page))) await expect(page.getByRole('tablist')).toBeVisible();
+    else if (name !== 'Planner') await expect(page.getByRole('dialog')).toBeVisible();
   }
+});
+
+test('phones open on a usable map with the route and cost in view at common widths', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'mobile', 'Phone layout only.');
+  for (const width of [360, 390, 430]) {
+    await page.setViewportSize({ width, height: 780 });
+    await openPlanner(page);
+    const layout = await page.evaluate(() => {
+      const box = (selector: string) => document.querySelector(selector)!.getBoundingClientRect();
+      return {
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        scrollWidth: document.documentElement.scrollWidth,
+        scrollHeight: document.documentElement.scrollHeight,
+        map: box('.sc-mobile-map'),
+        card: box('.sc-route-card'),
+        cost: box('[data-testid="selected-cost"]'),
+      };
+    });
+    expect(layout.scrollWidth, `${width}px width`).toBeLessThanOrEqual(layout.viewport.width);
+    // The shell fills the screen; only the sheet and pages scroll inside it.
+    expect(layout.scrollHeight, `${width}px height`).toBeLessThanOrEqual(layout.viewport.height);
+    expect(layout.map.height, `${width}px map`).toBeGreaterThan(200);
+    expect(layout.card.top).toBeGreaterThanOrEqual(0);
+    expect(layout.cost.bottom).toBeLessThanOrEqual(layout.viewport.height);
+  }
+});
+
+test('phone pages close with the system back button and keep the chosen option', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'mobile', 'Phone layout only.');
+  await openPlanner(page);
+  await page.getByTestId('route-card-transit').click();
+  await expect(page.getByTestId('selected-cost')).toContainText('13.00');
+  await page.getByRole('button', { name: 'Compare all', exact: true }).click();
+  await page.getByRole('button', { name: 'Cost breakdown', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Cost breakdown' })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole('dialog', { name: 'Comparison' })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByTestId('selected-cost')).toContainText('13.00');
+
+  // Leaving the route page without Done restores the trip that was planned.
+  await editRoute(page);
+  await page.getByLabel('Destination', { exact: true }).fill('Albany, Auckland');
+  await page.goBack();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /^Edit route:/ })).toContainText('Britomart');
+
+  // The sheet collapses to its summary and opens again from the same button.
+  await page.getByRole('button', { name: 'Hide options', exact: true }).click();
+  await expect(page.getByTestId('route-card-drive')).toBeHidden();
+  await expect(page.getByTestId('selected-cost')).toBeVisible();
+  await page.getByRole('button', { name: 'Show options', exact: true }).click();
+  await expect(page.getByTestId('route-card-drive')).toBeVisible();
 });
 
 test('production build reloads from its service-worker cache while offline', async ({

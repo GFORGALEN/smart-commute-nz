@@ -20,9 +20,14 @@ test('standalone widget mounts without a host framework and recalculates', async
   });
   const widget = page.locator('#independent-widget');
   await expect(widget.getByTestId('route-card-drive')).toContainText('13.95');
-  const toggle = widget.getByRole('button', { name: 'Edit journey inputs', exact: true });
-  if (await toggle.isVisible()) await toggle.click();
+  // On a phone the widget opens on its map; places and costs are on their own pages.
+  const phone = (await widget.locator('.sc-mobile').count()) > 0;
+  if (phone) await widget.getByRole('button', { name: /^Edit route:/ }).click();
   await expect(widget.getByLabel('Destination', { exact: true })).toHaveValue('Panmure station');
+  if (phone) {
+    await widget.getByRole('button', { name: 'Done', exact: true }).click();
+    await widget.getByRole('button', { name: 'Adjust fares and costs', exact: true }).click();
+  }
   await widget.getByLabel('Fuel price (NZ$/L)', { exact: true }).fill('5');
   await expect(widget.getByTestId('route-card-drive')).toContainText('18.62');
   await expect(widget.getByTestId('route-card-transit')).toContainText('Lowest cost');

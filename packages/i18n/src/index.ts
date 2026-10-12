@@ -414,6 +414,20 @@ const en = {
   googleErrorIncomplete:
     'Google returned an incomplete route, such as a missing fare or distance. Enter the missing value yourself or try another time.',
   googleErrorBusy: 'A route request is already running. Wait for it to finish.',
+  mobileBack: 'Back',
+  mobileDiscardRoute: 'Discard changes and go back',
+  mobileEditRoute: 'Edit route',
+  mobileWhereTo: 'Where are you going?',
+  mobileChooseDestination: 'Choose destination',
+  mobilePlanPrompt: 'Add a destination to compare what each way of getting there costs.',
+  mobileExpandSheet: 'Show options',
+  mobileCollapseSheet: 'Hide options',
+  mobileSheetLabel: 'Cost options',
+  mobileCompareAll: 'Compare all',
+  mobileDone: 'Done',
+  mobileMapTools: 'Map tools',
+  mobileCostsLive: 'Costs recalculate as you type.',
+  mobileFixInputs: 'Check the route details',
 } as const;
 
 const zh: Record<keyof typeof en, string> = {
@@ -801,6 +815,20 @@ const zh: Record<keyof typeof en, string> = {
   googleErrorIncomplete:
     'Google 返回的路线不完整，例如缺少票价或距离。请自行填写缺少的数值，或换个时间再试。',
   googleErrorBusy: '已有路线请求正在进行，请等待完成。',
+  mobileBack: '返回',
+  mobileDiscardRoute: '放弃修改并返回',
+  mobileEditRoute: '编辑路线',
+  mobileWhereTo: '你要去哪里？',
+  mobileChooseDestination: '选择目的地',
+  mobilePlanPrompt: '填写目的地后，即可比较各种出行方式的费用。',
+  mobileExpandSheet: '展开方案',
+  mobileCollapseSheet: '收起方案',
+  mobileSheetLabel: '费用方案',
+  mobileCompareAll: '详细比较',
+  mobileDone: '完成',
+  mobileMapTools: '地图工具',
+  mobileCostsLive: '修改后费用即时重算。',
+  mobileFixInputs: '检查路线信息',
 };
 
 export const messages = { en, 'zh-CN': zh };
