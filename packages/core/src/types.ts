@@ -48,6 +48,8 @@ export interface TravelLeg {
   transfers?: number;
   /** Traffic delay against free-flow time, in minutes, from a traffic-aware route provider. */
   congestionMinutes?: number;
+  /** No fare is known yet. The leg adds nothing, and the option cannot be ranked until confirmed. */
+  farePending?: boolean;
   source: DataSource;
   estimated: boolean;
 }
@@ -62,6 +64,11 @@ export interface JourneyOption {
   parkingCost: number;
   parkingVerified?: boolean;
   waypoints: Location[];
+  /**
+   * Where the return legs came from: a route requested for the return time, or a budget
+   * reference built from the outbound route. Missing means entered or routed directly.
+   */
+  returnBasis?: 'routed' | 'estimated-from-outbound';
 }
 
 export interface CommuteSettings {
@@ -96,7 +103,11 @@ export interface LegTotals {
 }
 
 export type WarningCode =
-  'estimated-data' | 'fare-range-estimate' | 'unverified-parking' | 'missing-return';
+  | 'estimated-data'
+  | 'fare-range-estimate'
+  | 'unverified-parking'
+  | 'missing-return'
+  | 'fare-pending';
 
 export interface RouteResult {
   id: string;

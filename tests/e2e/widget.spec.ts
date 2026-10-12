@@ -25,7 +25,10 @@ test('standalone widget mounts without a host framework and recalculates', async
   if (phone) await widget.getByRole('button', { name: /^Edit route:/ }).click();
   await expect(widget.getByLabel('Destination', { exact: true })).toHaveValue('Panmure station');
   if (phone) {
-    await widget.getByRole('button', { name: 'Done', exact: true }).click();
+    await widget
+      .locator('.sc-route-footer')
+      .getByRole('button', { name: 'Done', exact: true })
+      .click();
     await widget.getByRole('button', { name: 'Adjust fares and costs', exact: true }).click();
   }
   await widget.getByLabel('Fuel price (NZ$/L)', { exact: true }).fill('5');

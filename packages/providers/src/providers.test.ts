@@ -186,6 +186,25 @@ describe('Google adapter without external paid requests', () => {
     );
     expect(accepted.computeRoutes.mock.calls[0]?.[0].computeAlternativeRoutes).toBe(false);
   });
+  it('keeps the outbound routes when no return route exists at the chosen time', async () => {
+    const { provider, computeRoutes } = mockGoogle([[drive(19000)], []]);
+    const result = await provider.getRoutes({ ...request, roundTrip: true, returnTime: nzWeekday });
+    expect(computeRoutes).toHaveBeenCalledTimes(2);
+    expect(result.returnStatus).toBe('no-routes');
+    expect(result.routes).toHaveLength(1);
+    expect(result.routes[0]!.outbound[0]!.distanceKm).toBe(19);
+    // The outbound route is not copied into a return.
+    expect(result.routes[0]!.inbound).toEqual([]);
+    expect(result.routes[0]!.returnBasis).toBeUndefined();
+    const routed = mockGoogle([[drive(19000)], [drive(20000)]]);
+    const both = await routed.provider.getRoutes({
+      ...request,
+      roundTrip: true,
+      returnTime: nzWeekday,
+    });
+    expect(both.returnStatus).toBe('routed');
+    expect(both.routes[0]!.returnBasis).toBe('routed');
+  });
   it('requires a return time before making any paid requests', async () => {
     const { provider, computeRoutes } = mockGoogle([[drive(1000)]]);
     await expect(provider.getRoutes({ ...request, roundTrip: true })).rejects.toMatchObject({
@@ -410,6 +429,44 @@ describe('Google adapter without external paid requests', () => {
     await Promise.resolve();
     expect(onSelect).not.toHaveBeenCalled();
     expect(widget.value).toBe('Newer typed address');
+    control();
+  });
+  it('reports when a chosen suggestion is still resolving to coordinates', async () => {
+    const widget = Object.assign(document.createElement('div'), { value: '' });
+    let completeDetails: () => void = () => undefined;
+    const place = {
+      formattedAddress: 'Resolved address',
+      location: { toJSON: () => ({ lat: -36.84, lng: 174.76 }) },
+      fetchFields: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            completeDetails = resolve;
+          }),
+      ),
+    };
+    const onResolving = vi.fn();
+    const provider = new GoogleRouteProvider({
+      apiKey: 'test-key',
+      loadLibrary: vi.fn().mockResolvedValue({
+        PlaceAutocompleteElement: vi.fn(function () {
+          return widget;
+        }),
+      }),
+    });
+    const control = await provider.attachAutocomplete(
+      document.createElement('div'),
+      vi.fn(),
+      undefined,
+      {
+        onResolving,
+      },
+    );
+    widget.dispatchEvent(
+      Object.assign(new Event('gmp-select'), { placePrediction: { toPlace: () => place } }),
+    );
+    expect(onResolving).toHaveBeenLastCalledWith(true);
+    completeDetails();
+    await vi.waitFor(() => expect(onResolving).toHaveBeenLastCalledWith(false));
     control();
   });
   it('sets selected formatted text and coordinates after the latest Place details resolve', async () => {
@@ -929,6 +986,46 @@ describe('Google adapter without external paid requests', () => {
     provider.clearMapRoutes();
     expect(first.setMap).toHaveBeenLastCalledWith(null);
     expect(second.setMap).toHaveBeenLastCalledWith(null);
+    provider.dispose();
+  });
+  it('draws a cached response on its own and leaves the map alone while a request runs', async () => {
+    const line = () => ({ setMap: vi.fn(), setOptions: vi.fn() });
+    const first = line();
+    const second = line();
+    const createFirst = vi.fn().mockReturnValue([first]);
+    const createSecond = vi.fn().mockReturnValue([second]);
+    class TestMap {
+      fitBounds = vi.fn();
+      addListener = vi.fn((_name: string, callback: () => void) => {
+        queueMicrotask(callback);
+        return { remove: vi.fn() };
+      });
+    }
+    const computeRoutes = vi
+      .fn()
+      .mockResolvedValueOnce({ routes: [{ ...drive(1000), createPolylines: createFirst }] })
+      .mockResolvedValueOnce({ routes: [{ ...drive(2000), createPolylines: createSecond }] });
+    const loadLibrary = vi
+      .fn()
+      .mockImplementation(async (name: string) =>
+        name === 'maps' ? { Map: TestMap } : { Route: { computeRoutes } },
+      );
+    const provider = new GoogleRouteProvider({ apiKey: 'test-key', loadLibrary });
+    await provider.initializeMap(document.createElement('div'));
+    const driving = await provider.getRoutes(request);
+    provider.renderRoute(driving.routes[0]!.id);
+    expect(first.setMap.mock.lastCall?.[0]).toBeInstanceOf(TestMap);
+    // A later request, for example another travel mode, does not wipe the drawn route.
+    const transit = await provider.getRoutes(request);
+    expect(first.setMap.mock.lastCall?.[0]).toBeInstanceOf(TestMap);
+    provider.renderRoute(transit.routes[0]!.id);
+    expect(first.setMap).toHaveBeenLastCalledWith(null);
+    expect(second.setMap.mock.lastCall?.[0]).toBeInstanceOf(TestMap);
+    // Returning to the first result redraws only its own alternatives.
+    createSecond.mockClear();
+    provider.renderRoute(driving.routes[0]!.id);
+    expect(createSecond).not.toHaveBeenCalled();
+    expect(first.setMap.mock.lastCall?.[0]).toBeInstanceOf(TestMap);
     provider.dispose();
   });
   it('records traffic delay from free-flow time on traffic-aware driving legs', async () => {

@@ -30,10 +30,13 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AUCKLAND_TIME_ZONE,
   compareOptions,
   createExampleOptions,
   DEFAULT_SETTINGS,
+  estimateReturnLegs,
   EXAMPLE_INTERCHANGE_LABEL,
+  resolveZonedTime,
   type CommuteSettings,
   type CostRange,
   type JourneyOption,
@@ -83,16 +86,36 @@ interface PlannerState {
   options: JourneyOption[];
   places: Location[];
   savedRoutes: JourneyOption[];
+  /** Auckland wall-clock time, `YYYY-MM-DDTHH:mm`. */
   departure: string;
+  /** Auckland wall-clock time of a chosen return departure. */
   returnTime: string;
   leaveNow: boolean;
+  /** A round trip either estimates the return from the outbound route or routes a chosen time. */
+  returnPolicy: 'estimate' | 'scheduled';
+  /** Which of two instants a time repeated by a daylight-saving change means, once chosen. */
+  departureFold?: 'earlier' | 'later';
+  returnFold?: 'earlier' | 'later';
+  /** Times saved in an unknown browser time zone; they are used only after confirmation. */
+  timesNeedReview?: boolean;
 }
+type LiveMode = 'drive' | 'transit';
+/** A route request's lifecycle, kept apart from the map's own loading state. */
+type RouteStatus =
+  | { state: 'idle' }
+  | { state: 'loading' | 'success' | 'no-routes'; key: string; mode: LiveMode }
+  | { state: 'error'; key: string; mode: LiveMode; code?: RouteErrorCode };
 const STORAGE_KEY = 'smart-commute-nz:v1';
+/** Storage version 2 records times as Auckland wall-clock times with their instants. */
+const TIMES_VERSION = 2;
+/** A cached leave-now result goes stale; a scheduled one stays valid for its instant. */
+const LEAVE_NOW_CACHE_MS = 10 * 60_000;
+const ROUTE_CACHE_SIZE = 8;
 /** Below the wide two-column layout, or a phone held sideways, the planner becomes map-first. */
 const MOBILE_QUERY = '(max-width: 899px), (max-height: 520px) and (pointer: coarse)';
 const SHORT_VIEWPORT_QUERY = '(max-height: 600px)';
 /** Route framing on the phone map keeps clear of the route card above and the tools beside it. */
-const MOBILE_MAP_PADDING = { top: 120, right: 88, bottom: 40, left: 48 };
+const MOBILE_MAP_PADDING = { top: 150, right: 40, bottom: 40, left: 40 };
 const HISTORY_LAYER_KEY = 'smartCommuteLayer';
 const historyLayer = (value: unknown) => {
   const layer = (value as Record<string, unknown> | null)?.[HISTORY_LAYER_KEY];
@@ -126,6 +149,7 @@ const warningKeys = {
   'unverified-parking': 'parkingWarning',
   'missing-return': 'returnWarning',
   'fare-range-estimate': 'fareRangeHelp',
+  'fare-pending': 'farePendingWarning',
 } as const;
 const googleErrorKeys: Record<RouteErrorCode, MessageKey> = {
   MISSING_KEY: 'googleErrorMissingKey',
@@ -156,6 +180,10 @@ interface RouteDraft {
   leaveNow: boolean;
   departure: string;
   returnTime: string;
+  returnPolicy: PlannerState['returnPolicy'];
+  departureFold?: 'earlier' | 'later';
+  returnFold?: 'earlier' | 'later';
+  timesNeedReview?: boolean;
   roundTrip: boolean;
   options: JourneyOption[];
   googleResponse: ProviderRouteResult | null;
@@ -204,23 +232,96 @@ const atFareContext = (option: JourneyOption, state: PlannerState, currentMinute
     ]),
   });
 
-const defaultReturnTime = () => {
-  const date = new Date(Date.now() + 8 * 60 * 60 * 1000);
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
-};
-/** Saved local times expire: traffic-aware driving rejects any departure in the past. */
-const isFutureTime = (value: string | undefined) => {
+/** Times saved before version 2 were browser-local strings with no recorded time zone. */
+const isFutureBrowserTime = (value: string | undefined) => {
   const time = value ? new Date(value).getTime() : NaN;
   return Number.isFinite(time) && time > Date.now();
 };
+const zonedInstant = (local: string | undefined, fold?: 'earlier' | 'later') => {
+  const resolution = resolveZonedTime(local ?? '', AUCKLAND_TIME_ZONE);
+  if (resolution.kind === 'valid') return resolution.instant;
+  if (resolution.kind === 'ambiguous') return fold ? resolution[fold] : resolution.earlier;
+  return undefined;
+};
+/** Saved Auckland times expire: traffic-aware driving rejects any departure in the past. */
+const isFutureAucklandTime = (value: string | undefined, fold?: 'earlier' | 'later') => {
+  const instant = zonedInstant(value, fold);
+  return instant !== undefined && instant > Date.now();
+};
+const isFold = (value: unknown): value is 'earlier' | 'later' =>
+  value === 'earlier' || value === 'later';
+/** A trip restored from storage with both places is planned once when the map is ready. */
+function hasSavedTrip(): boolean {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as {
+      origin?: Location;
+      destination?: Location;
+    } | null;
+    return Boolean(saved?.origin?.label?.trim() && saved.destination?.label?.trim());
+  } catch {
+    return false;
+  }
+}
+function savedLiveMode(): LiveMode {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as {
+      liveMode?: unknown;
+    } | null;
+    return saved?.liveMode === 'transit' ? 'transit' : 'drive';
+  } catch {
+    return 'drive';
+  }
+}
+
+/**
+ * Restores saved times. Version 2 times are Auckland times and expire once past. Older times
+ * were read in whatever zone the browser had, which is not recorded, so they are kept only
+ * if still in the future and must be confirmed before use; they are never guessed to be
+ * Auckland times.
+ */
+function restoreTimes(
+  saved: Partial<PlannerState> & { timesVersion?: number },
+): Pick<
+  PlannerState,
+  'leaveNow' | 'departure' | 'returnTime' | 'returnPolicy' | 'departureFold' | 'returnFold'
+> & { timesNeedReview?: boolean } {
+  const current = saved.timesVersion === TIMES_VERSION;
+  const future = (value: string | undefined, fold?: 'earlier' | 'later') =>
+    current ? isFutureAucklandTime(value, fold) : isFutureBrowserTime(value);
+  const departureFold = current && isFold(saved.departureFold) ? saved.departureFold : undefined;
+  const returnFold = current && isFold(saved.returnFold) ? saved.returnFold : undefined;
+  const keepDeparture = saved.leaveNow === false && future(saved.departure, departureFold);
+  const keepReturn = future(saved.returnTime, returnFold);
+  const policy =
+    current && (saved.returnPolicy === 'scheduled' || saved.returnPolicy === 'estimate')
+      ? saved.returnPolicy
+      : keepReturn
+        ? 'scheduled'
+        : 'estimate';
+  return {
+    leaveNow: !keepDeparture,
+    departure: keepDeparture ? saved.departure! : '',
+    returnTime: keepReturn ? saved.returnTime! : '',
+    returnPolicy: policy === 'scheduled' && !keepReturn ? 'estimate' : policy,
+    ...(departureFold && keepDeparture ? { departureFold } : {}),
+    ...(returnFold && keepReturn ? { returnFold } : {}),
+    ...(!current && (keepDeparture || keepReturn)
+      ? { timesNeedReview: true }
+      : current && saved.timesNeedReview && (keepDeparture || keepReturn)
+        ? { timesNeedReview: true }
+        : {}),
+  };
+}
 
 function initialState(props: SmartCommutePlannerProps): PlannerState {
+  // A new live trip on a phone starts one way and now; offline examples keep their round trip.
+  const phone = typeof window !== 'undefined' && Boolean(window.matchMedia?.(MOBILE_QUERY).matches);
   const fallback: PlannerState = {
     origin: toLocation(props.origin ?? '4 Fong Road, Auckland'),
     destination: toLocation(props.destination),
     settings: {
       ...DEFAULT_SETTINGS,
+      roundTrip: phone && props.googleApiKey ? false : DEFAULT_SETTINGS.roundTrip,
       fuelPrice: props.fuelPrice ?? DEFAULT_SETTINGS.fuelPrice,
       fuelConsumption: props.fuelConsumption ?? DEFAULT_SETTINGS.fuelConsumption,
     },
@@ -228,15 +329,16 @@ function initialState(props: SmartCommutePlannerProps): PlannerState {
     places: [],
     savedRoutes: [],
     departure: '',
-    returnTime: props.googleApiKey ? defaultReturnTime() : '',
+    returnTime: '',
     leaveNow: true,
+    returnPolicy: 'estimate',
   };
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (!stored) return fallback;
     const parsed: unknown = JSON.parse(stored);
     if (!parsed || typeof parsed !== 'object') return fallback;
-    const saved = parsed as Partial<PlannerState>;
+    const saved = parsed as Partial<PlannerState> & { timesVersion?: number };
     if (!saved.settings || !Array.isArray(saved.options) || !saved.origin || !saved.destination)
       return fallback;
     saved.options = saved.options.filter((option) => !hasGoogleProvenance(option));
@@ -270,10 +372,7 @@ function initialState(props: SmartCommutePlannerProps): PlannerState {
             }
           })
         : [],
-      ...(saved.leaveNow === false && !isFutureTime(saved.departure)
-        ? { leaveNow: true, departure: '' }
-        : {}),
-      returnTime: isFutureTime(saved.returnTime) ? saved.returnTime! : fallback.returnTime,
+      ...restoreTimes(saved),
     };
   } catch {
     return fallback;
@@ -396,12 +495,19 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     () => typeof window === 'undefined' || !window.matchMedia?.(SHORT_VIEWPORT_QUERY).matches,
   );
   const [weatherOpen, setWeatherOpen] = useState(false);
+  // Route page sub-states: searching one place, the time panel, and its stops or more panel.
+  const [searchField, setSearchField] = useState<'origin' | 'destination' | null>(null);
+  const [schedulePanelOpen, setSchedulePanelOpen] = useState(false);
+  const [routePanel, setRoutePanel] = useState<'stops' | 'more' | null>(null);
+  const mobileTopRef = useRef<HTMLDivElement>(null);
   const routeEditing = isMobile && pages.includes('route');
   const routeEditingRef = useRef(routeEditing);
   routeEditingRef.current = routeEditing;
   // Address search lives in the planner column on wide screens and in the route page on phones.
   const addressInputsMounted = isMobile ? routeEditing : screen === 'planner';
-  const [editingMode, setEditingMode] = useState<JourneyOption['mode']>('drive');
+  const [editingMode, setEditingMode] = useState<JourneyOption['mode']>(() =>
+    props.googleApiKey ? savedLiveMode() : 'drive',
+  );
   const [selectedId, setSelectedId] = useState('drive');
   const [notice, setNotice] = useState('');
   const [locationLoading, setLocationLoading] = useState(false);
@@ -413,17 +519,20 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   stopoverDraftRef.current = stopoverDraft;
   const [mapStopoverPicking, setMapStopoverPicking] = useState(false);
   const [mapDestinationPicking, setMapDestinationPicking] = useState(false);
-  // Bumped when a mode switch or a map-picked destination should plan without another click.
-  const [autoPlanToken, setAutoPlanToken] = useState(0);
+  // Set when a mode switch or a map-picked destination should plan without another click.
+  const [planIntent, setPlanIntent] = useState<{ mode: LiveMode; seq: number } | null>(null);
+  const requestPlan = (mode: LiveMode) =>
+    setPlanIntent((current) => ({ mode, seq: (current?.seq ?? 0) + 1 }));
+  const [routeStatus, setRouteStatus] = useState<RouteStatus>({ state: 'idle' });
+  const [addressResolving, setAddressResolving] = useState(0);
   const [summaryInView, setSummaryInView] = useState(true);
   const summaryRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLElement>(null);
   const [showAllRoutes, setShowAllRoutes] = useState(false);
   const [sortBy, setSortBy] = useState<'cost' | 'time' | 'distance' | 'value'>('cost');
   const [manualRequested, setManualRequested] = useState(false);
-  const [googleStatus, setGoogleStatus] = useState<
-    'idle' | 'loading' | 'ready' | 'routes' | 'error'
-  >('idle');
+  // The map's own lifecycle; route requests have their own status.
+  const [googleStatus, setGoogleStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [googleRequests, setGoogleRequests] = useState(0);
   const [googleError, setGoogleError] = useState('');
   const [googleResponse, setGoogleResponse] = useState<ProviderRouteResult | null>(null);
@@ -448,13 +557,23 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   >([]);
   const autocompleteGeneration = useRef(0);
   const autocompletePending = useRef(false);
-  const routePending = useRef(false);
+  // Requests run one at a time; a newer choice made meanwhile waits here and runs next.
+  const inFlightKey = useRef<string | null>(null);
+  const queuedMode = useRef<LiveMode | null>(null);
+  const routeCache = useRef(
+    new Map<
+      string,
+      { response: ProviderRouteResult; requestedAt: number; leaveNow: boolean; selectedId?: string }
+    >(),
+  );
+  const restorePending = useRef<boolean | null>(null);
+  if (restorePending.current === null) restorePending.current = hasSavedTrip();
   const mapLoadPending = useRef(false);
   const mapReadyProvider = useRef<GoogleRouteProvider | null>(null);
   const resetProvider = useRef<GoogleRouteProvider | null>(null);
   const mounted = useRef(true);
   const lastRequestedQuery = useRef('');
-  const lastRequestedMode = useRef<'drive' | 'transit'>('drive');
+
   const googlePlaceSignatures = useRef(new Set<string>());
   const manualLocations = useRef({ origin: state.origin, destination: state.destination });
   const provider = useMemo(
@@ -485,17 +604,66 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     [drivingPreference?.waypoints],
   );
   const stopoverRoutingBlocked = editingMode === 'transit' && drivingStops.length > 0;
-  const liveQueryFingerprint = JSON.stringify({
-    origin: state.origin,
-    destination: state.destination,
-    roundTrip: state.settings.roundTrip,
-    leaveNow: state.leaveNow,
-    departure: state.departure,
-    returnTime: state.returnTime,
-    waypoints: state.options
-      .filter((option) => !hasGoogleProvenance(option) && option.mode === 'drive')
-      .map((option) => ({ id: option.id, waypoints: option.waypoints })),
-  });
+  // Entered times are Auckland wall-clock times; each resolves to one absolute instant.
+  const resolveEntered = (local: string, fold: 'earlier' | 'later' | undefined) => {
+    const resolution = resolveZonedTime(local, AUCKLAND_TIME_ZONE);
+    const instant =
+      resolution.kind === 'valid'
+        ? resolution.instant
+        : resolution.kind === 'ambiguous' && fold
+          ? resolution[fold]
+          : undefined;
+    return { resolution, instant };
+  };
+  const departureEntry = resolveEntered(state.departure, state.departureFold);
+  const returnEntry = resolveEntered(state.returnTime, state.returnFold);
+  const scheduledReturn = state.settings.roundTrip && state.returnPolicy === 'scheduled';
+  // Live planning routes a return only for a chosen time; otherwise the return is a budget estimate.
+  const routedReturn = googleMode && scheduledReturn;
+  const departureInvalid = !state.leaveNow && departureEntry.instant === undefined;
+  const showReturnTime = googleMode ? scheduledReturn : state.settings.roundTrip && !state.leaveNow;
+  const returnTimeMissing = routedReturn && !state.returnTime;
+  const returnInvalid =
+    showReturnTime && Boolean(state.returnTime) && returnEntry.instant === undefined;
+  const departureAt = state.leaveNow ? currentMinute * 60000 : departureEntry.instant;
+  const returnAt = showReturnTime ? returnEntry.instant : undefined;
+  const returnBeforeDeparture =
+    returnAt !== undefined && departureAt !== undefined && returnAt <= departureAt;
+  const timesNeedReview = Boolean(state.timesNeedReview) && (!state.leaveNow || showReturnTime);
+  const timesBlocked =
+    departureInvalid ||
+    timesNeedReview ||
+    (routedReturn && (returnTimeMissing || returnInvalid || returnBeforeDeparture));
+  const liveMode: LiveMode = editingMode === 'transit' ? 'transit' : 'drive';
+  const placeKey = (place: Location) => [
+    place.label.trim(),
+    place.coordinates?.lat ?? null,
+    place.coordinates?.lng ?? null,
+  ];
+  // Everything that changes which routes come back; cost inputs only change prices.
+  const routeQueryKey = (mode: LiveMode) =>
+    JSON.stringify({
+      origin: placeKey(state.origin),
+      destination: placeKey(state.destination),
+      waypoints: mode === 'drive' ? drivingStops.map(placeKey) : [],
+      mode,
+      departure: state.leaveNow ? 'now' : (departureAt ?? null),
+      return: routedReturn ? { at: returnAt ?? null } : 'outbound-only',
+    });
+  const liveQueryFingerprint = routeQueryKey(liveMode);
+  const routeLoading = routeStatus.state === 'loading' && routeStatus.key === liveQueryFingerprint;
+  const planDisabled =
+    googleStatus !== 'ready' ||
+    !state.origin.label.trim() ||
+    !state.destination.label.trim() ||
+    stopoverRoutingBlocked ||
+    timesBlocked ||
+    routeLoading ||
+    addressResolving > 0;
+  const currentRouteStatus: RouteStatus =
+    routeStatus.state !== 'idle' && routeStatus.key === liveQueryFingerprint
+      ? routeStatus
+      : { state: 'idle' };
   const activeQuery = useRef(liveQueryFingerprint);
   activeQuery.current = liveQueryFingerprint;
   const routeDraft = useRef<RouteDraft | null>(null);
@@ -526,17 +694,19 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     error: boolean;
     incompleteOptions: JourneyOption[];
     staleFareOptions: JourneyOption[];
+    pendingFareOptions: JourneyOption[];
   }>(() => {
+    const empty = { incompleteOptions: [], staleFareOptions: [], pendingFareOptions: [] };
     try {
       if (!state.origin.label.trim() || !state.destination.label.trim())
-        return { result: null, error: true, incompleteOptions: [], staleFareOptions: [] };
+        return { result: null, error: true, ...empty };
       if (!visibleOptions.length) {
         // Validate settings without presenting offline examples as live routes.
         compareOptions(
           state.options.filter((option) => !hasGoogleProvenance(option)),
           state.settings,
         );
-        return { result: null, error: false, incompleteOptions: [], staleFareOptions: [] };
+        return { result: null, error: false, ...empty };
       }
       const all = compareOptions(visibleOptions, state.settings);
       // Core exposes partial totals with a warning for callers that need them.
@@ -551,10 +721,22 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             atFareContexts[result.id] !== atFareContext(result.option, state, currentMinute),
         )
         .map((result) => result.option);
-      if (!incompleteOptions.length && !staleFareOptions.length)
-        return { result: all, error: false, incompleteOptions, staleFareOptions };
+      // An estimated return without a known fare is not a cheaper option; it is unpriced.
+      const pendingFareOptions = all.results
+        .filter((result) => result.warnings.includes('fare-pending'))
+        .map((result) => result.option);
+      if (!incompleteOptions.length && !staleFareOptions.length && !pendingFareOptions.length)
+        return {
+          result: all,
+          error: false,
+          incompleteOptions,
+          staleFareOptions,
+          pendingFareOptions,
+        };
       const excluded = new Set(
-        [...incompleteOptions, ...staleFareOptions].map((option) => option.id),
+        [...incompleteOptions, ...staleFareOptions, ...pendingFareOptions].map(
+          (option) => option.id,
+        ),
       );
       const completeOptions = all.results
         .filter((result) => !excluded.has(result.id))
@@ -564,14 +746,16 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         error: false,
         incompleteOptions,
         staleFareOptions,
+        pendingFareOptions,
       };
     } catch {
-      return { result: null, error: true, incompleteOptions: [], staleFareOptions: [] };
+      return { result: null, error: true, ...empty };
     }
   }, [state, visibleOptions, atFareContexts, currentMinute]);
-  const noComparableRoutesKey = comparison.staleFareOptions.length
-    ? 'noComparableRoutes'
-    : 'noCompleteRoutes';
+  const noComparableRoutesKey =
+    comparison.staleFareOptions.length || comparison.pendingFareOptions.length
+      ? 'noComparableRoutes'
+      : 'noCompleteRoutes';
   const selected =
     comparison.result?.results.find((result) => result.id === selectedId) ??
     comparison.result?.results[0];
@@ -637,7 +821,17 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           ? 'budgetBestValue'
           : kind,
     );
-  const tripScope = t(state.settings.roundTrip ? 'returnIncluded' : 'oneWay');
+  const estimatedReturn = Boolean(
+    state.settings.roundTrip &&
+    visibleOptions.some((option) => option.returnBasis === 'estimated-from-outbound'),
+  );
+  const tripScope = t(
+    !state.settings.roundTrip
+      ? 'oneWay'
+      : estimatedReturn
+        ? 'returnEstimateScope'
+        : 'returnIncluded',
+  );
   const wholeMinutes = (minutes: number) => t('minutes', { count: Math.round(minutes) });
   // Clock times are always shown in Auckland time, whatever the browser timezone.
   const aucklandClock = useMemo(
@@ -677,21 +871,20 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   googleErrorText.current = describeGoogleError;
   const originMissing = !state.origin.label.trim();
   const destinationMissing = !state.destination.label.trim();
-  const departureInvalid =
-    !state.leaveNow && (!state.departure || Number.isNaN(new Date(state.departure).getTime()));
-  const returnTimeMissing = googleMode && state.settings.roundTrip && !state.returnTime;
-  const showReturnTime = state.settings.roundTrip && (googleMode || !state.leaveNow);
-  const departureAt = state.leaveNow
-    ? currentMinute * 60000
-    : departureInvalid
-      ? undefined
-      : new Date(state.departure).getTime();
-  const returnAt =
-    state.settings.roundTrip &&
-    state.returnTime &&
-    !Number.isNaN(new Date(state.returnTime).getTime())
-      ? new Date(state.returnTime).getTime()
-      : undefined;
+  const timeError = (
+    entry: typeof departureEntry,
+    local: string,
+    missing: MessageKey,
+  ): string | undefined =>
+    !local
+      ? t(missing)
+      : entry.resolution.kind === 'nonexistent'
+        ? t('timeSkipped')
+        : entry.resolution.kind === 'invalid'
+          ? t('timeInvalid')
+          : entry.instant === undefined
+            ? t('timeRepeated')
+            : undefined;
   // Weather reuses the absolute departure instant, never the browser's wall-clock reading.
   const weather = useWeather({
     coordinates: state.origin.coordinates,
@@ -811,6 +1004,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     autocompletePending.current = false;
     setAddressSearchEnabled(false);
     setAddressSearchPending(false);
+    setAddressResolving(0);
   }, [addressInputsMounted, googleMode, provider]);
   useEffect(() => {
     for (const control of autocompleteControls.current) {
@@ -822,6 +1016,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     const restored = restoredFingerprint.current === liveQueryFingerprint;
     restoredFingerprint.current = '';
     if (restored) return;
+    // A result already found for these conditions and mode comes back without a request.
+    if (restoreCachedAction.current(liveQueryFingerprint)) return;
     setState((current) =>
       current.options.some(hasGoogleProvenance)
         ? { ...current, options: current.options.filter((option) => !hasGoogleProvenance(option)) }
@@ -837,6 +1033,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     mapReadyProvider.current = null;
     mapLoadPending.current = false;
     lastRequestedQuery.current = '';
+    routeCache.current.clear();
+    queuedMode.current = null;
+    setRouteStatus({ state: 'idle' });
     setGoogleStatus('idle');
     setGoogleRequests(0);
     setGoogleError('');
@@ -884,13 +1083,26 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 googlePlaceSignatures.current.has(JSON.stringify(place)),
               ),
           ),
+          timesVersion: TIMES_VERSION,
+          timeZone: AUCKLAND_TIME_ZONE,
+          departureInstant: departureEntry.instant ?? null,
+          returnInstant: returnEntry.instant ?? null,
+          liveMode,
         }),
       );
       localStorage.setItem('smart-commute-nz:appearance', JSON.stringify({ locale, theme }));
     } catch {
       /* A private browser or full storage still supports the calculator. */
     }
-  }, [state, comparison.error, locale, theme]);
+  }, [
+    state,
+    comparison.error,
+    locale,
+    theme,
+    departureEntry.instant,
+    returnEntry.instant,
+    liveMode,
+  ]);
   useEffect(() => {
     if (!notice) return;
     const timer = window.setTimeout(() => setNotice(''), 4200);
@@ -1011,6 +1223,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   };
   const selectResult = (result: RouteResult) => {
     setSelectedId(result.id);
+    const cached = routeCache.current.get(liveQueryFingerprint);
+    if (cached && hasGoogleProvenance(result.option)) cached.selectedId = result.id;
     if (googleMode) setEditingMode(result.option.mode);
     props.onRouteSelected?.(result);
     // Google routes are redrawn by the map effect, which keeps selection and labels in sync.
@@ -1125,7 +1339,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             coordinates,
           },
         }));
-        setAutoPlanToken((count) => count + 1);
+        requestPlan(liveModeRef.current);
       });
       setMapDestinationPicking(true);
     } catch (error) {
@@ -1243,11 +1457,16 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             if (!isCurrent()) return;
             googlePlaceSignatures.current.add(JSON.stringify(location));
             setState((current) => ({ ...current, [field]: location }));
+            setSearchField(null);
           },
           onError,
           {
             initialValue: state[field].label,
             label: t(field === 'origin' ? 'origin' : 'destination'),
+            onResolving: (resolving) => {
+              if (isCurrent())
+                setAddressResolving((count) => Math.max(0, count + (resolving ? 1 : -1)));
+            },
             onInput: (label) => {
               if (!isCurrent()) return;
               setState((current) =>
@@ -1282,11 +1501,74 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       }
     }
   };
-  const getGoogleRoutes = async (mode: 'drive' | 'transit' = 'drive') => {
+  /** Live options for a response: cost preferences applied, and a budget return when none was routed. */
+  const liveOptions = (response: ProviderRouteResult, costs?: JourneyOption) =>
+    response.routes.map((route) => {
+      const option: JourneyOption =
+        route.inbound.length === 0 && response.returnStatus === undefined
+          ? {
+              ...route,
+              inbound: estimateReturnLegs(route.outbound),
+              returnBasis: 'estimated-from-outbound',
+            }
+          : route;
+      if (option.mode !== 'drive') return option;
+      const toll = (direction: Direction) =>
+        costs?.[direction].find((segment) => segment.mode === 'drive')?.toll ?? 0;
+      return {
+        ...option,
+        parkingCost: costs?.parkingCost ?? 0,
+        outbound: option.outbound.map((leg) =>
+          leg.mode === 'drive' ? { ...leg, toll: toll('outbound') } : leg,
+        ),
+        inbound: option.inbound.map((leg) =>
+          leg.mode === 'drive' ? { ...leg, toll: toll('inbound') } : leg,
+        ),
+      };
+    });
+  const showLiveResponse = (
+    response: ProviderRouteResult,
+    key: string,
+    mode: LiveMode,
+    selectedRoute?: string,
+  ) => {
+    setGoogleResponse(response);
+    setState((current) => ({
+      ...current,
+      options: [
+        ...current.options.filter((option) => !hasGoogleProvenance(option)),
+        ...liveOptions(
+          response,
+          current.options.find((option) => option.mode === 'drive' && !hasGoogleProvenance(option)),
+        ),
+      ],
+    }));
+    const first = response.routes[0]?.id;
+    if (first) setSelectedId(selectedRoute ?? first);
+    setRouteStatus({ state: response.routes.length ? 'success' : 'no-routes', key, mode });
+  };
+  const freshCached = (key: string) => {
+    const entry = routeCache.current.get(key);
+    if (!entry || (entry.leaveNow && Date.now() - entry.requestedAt > LEAVE_NOW_CACHE_MS)) return;
+    return entry;
+  };
+  const restoreCached = (key: string) => {
+    const entry = googleMode ? freshCached(key) : undefined;
+    if (!entry) return false;
+    showLiveResponse(entry.response, key, liveMode, entry.selectedId);
+    return true;
+  };
+  const restoreCachedAction = useRef(restoreCached);
+  restoreCachedAction.current = restoreCached;
+  const liveModeRef = useRef(liveMode);
+  liveModeRef.current = liveMode;
+  const getGoogleRoutes = async (
+    mode: LiveMode = 'drive',
+    { force = false }: { force?: boolean } = {},
+  ) => {
     if (
       !googleMode ||
       comparison.error ||
-      routePending.current ||
       !state.origin.label.trim() ||
       !state.destination.label.trim()
     )
@@ -1295,105 +1577,72 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       setGoogleError(t('transitStopoverUnsupported'));
       return;
     }
-    if (state.settings.roundTrip && !state.returnTime) {
+    if (returnTimeMissing) {
       setNotice(t('googleMissingReturn'));
       return;
     }
-    if (departureInvalid) return;
-    setGoogleStatus('routes');
-    routePending.current = true;
-    const query = activeQuery.current;
-    lastRequestedQuery.current = query;
-    lastRequestedMode.current = mode;
+    if (timesBlocked) return;
+    // Planning waits for the map, so drawn routes and results always arrive together.
+    if (mapReadyProvider.current !== provider) {
+      queuedMode.current = mode;
+      return;
+    }
+    const key = routeQueryKey(mode);
+    if (!force && freshCached(key)) {
+      if (key === activeQuery.current) restoreCached(key);
+      return;
+    }
+    if (inFlightKey.current) {
+      // Only the latest choice runs next; anything chosen in between is dropped.
+      queuedMode.current = mode;
+      setRouteStatus({ state: 'loading', key, mode });
+      return;
+    }
+    inFlightKey.current = key;
+    lastRequestedQuery.current = key;
+    setRouteStatus({ state: 'loading', key, mode });
     setGoogleError('');
+    const leaveNow = state.leaveNow;
     try {
       const response = await provider.getRoutes({
         origin: state.origin,
         destination: state.destination,
         mode,
         waypoints: mode === 'drive' ? (drivingPreference?.waypoints ?? []) : [],
-        departureTime: state.leaveNow || !state.departure ? undefined : new Date(state.departure),
-        returnTime: state.settings.roundTrip ? new Date(state.returnTime) : undefined,
-        roundTrip: state.settings.roundTrip,
+        // Leaving now lets the provider use the instant the request is made.
+        departureTime: leaveNow || departureAt === undefined ? undefined : new Date(departureAt),
+        returnTime: routedReturn && returnAt !== undefined ? new Date(returnAt) : undefined,
+        roundTrip: routedReturn,
       });
-      if (
-        !mounted.current ||
-        activeProvider.current !== provider ||
-        mapReadyProvider.current !== provider ||
-        activeQuery.current !== query
-      ) {
-        provider.clearMapRoutes();
-        return;
-      }
-      setGoogleResponse(response);
-      setState((current) => {
-        const costs = current.options.find(
-          (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
-        );
-        return {
-          ...current,
-          options: [
-            ...current.options.filter((option) => !hasGoogleProvenance(option)),
-            ...response.routes.map((option) =>
-              option.mode === 'drive'
-                ? {
-                    ...option,
-                    parkingCost: costs?.parkingCost ?? 0,
-                    outbound: option.outbound.map((leg) =>
-                      leg.mode === 'drive'
-                        ? {
-                            ...leg,
-                            toll:
-                              costs?.outbound.find((segment) => segment.mode === 'drive')?.toll ??
-                              0,
-                          }
-                        : leg,
-                    ),
-                    inbound: option.inbound.map((leg) =>
-                      leg.mode === 'drive'
-                        ? {
-                            ...leg,
-                            toll:
-                              costs?.inbound.find((segment) => segment.mode === 'drive')?.toll ?? 0,
-                          }
-                        : leg,
-                    ),
-                  }
-                : option,
-            ),
-          ],
-        };
-      });
-      setGoogleRequests(provider.getMetrics().routeRequests);
-      setGoogleStatus('ready');
+      if (!mounted.current || activeProvider.current !== provider) return;
+      routeCache.current.set(key, { response, requestedAt: Date.now(), leaveNow });
+      for (const stale of [...routeCache.current.keys()].slice(0, -ROUTE_CACHE_SIZE))
+        routeCache.current.delete(stale);
+      // A newer choice is showing; this result stays cached for when it is chosen again.
+      if (activeQuery.current !== key) return;
+      showLiveResponse(response, key, mode);
       setNotice('');
-      if (response.routes[0]) setSelectedId(response.routes[0].id);
       if (!window.matchMedia?.(SHORT_VIEWPORT_QUERY).matches) setSheetOpen(true);
     } catch (error) {
-      if (
-        !mounted.current ||
-        activeProvider.current !== provider ||
-        mapReadyProvider.current !== provider ||
-        activeQuery.current !== query
-      )
+      if (!mounted.current || activeProvider.current !== provider || activeQuery.current !== key)
         return;
-      setGoogleRequests(provider.getMetrics().routeRequests);
-      setGoogleError(describeGoogleError(error));
-      if (
-        error instanceof RouteProviderError &&
-        ['NETWORK_ERROR', 'REQUEST_DENIED', 'QUOTA_EXCEEDED'].includes(error.code)
-      ) {
-        setManualRequested(true);
+      const code = error instanceof RouteProviderError ? error.code : undefined;
+      if (code === 'NO_ROUTES') {
+        // An explicit empty answer, not a failure: say so for this mode and time.
+        setRouteStatus({ state: 'no-routes', key, mode });
+        return;
       }
+      setRouteStatus({ state: 'error', key, mode, code });
+      setGoogleError(describeGoogleError(error));
+      if (code && ['NETWORK_ERROR', 'REQUEST_DENIED', 'QUOTA_EXCEEDED'].includes(code))
+        setManualRequested(true);
     } finally {
-      routePending.current = false;
-      if (
-        mounted.current &&
-        activeProvider.current === provider &&
-        mapReadyProvider.current === provider
-      ) {
+      inFlightKey.current = null;
+      if (mounted.current && activeProvider.current === provider) {
         setGoogleRequests(provider.getMetrics().routeRequests);
-        setGoogleStatus((current) => (current === 'error' ? current : 'ready'));
+        const next = queuedMode.current;
+        queuedMode.current = null;
+        if (next) void routeAction.current(next);
       }
     }
   };
@@ -1404,20 +1653,23 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   addressSearchAction.current = enableAddressSearch;
   const routeAction = useRef(getGoogleRoutes);
   routeAction.current = getGoogleRoutes;
-  const autoPlanContext = useRef({ googleMode, googleStatus, editingMode, stops: 0 });
-  autoPlanContext.current = { googleMode, googleStatus, editingMode, stops: drivingStops.length };
+  const stopCount = useRef(0);
+  stopCount.current = drivingStops.length;
   useEffect(() => {
-    const context = autoPlanContext.current;
-    if (!autoPlanToken || !context.googleMode || context.googleStatus !== 'ready') return;
     // The phone route page is a draft: it plans only when the person confirms it.
-    if (routeEditingRef.current) return;
-    const mode = context.editingMode === 'transit' ? 'transit' : 'drive';
+    if (!planIntent || routeEditingRef.current) return;
     // Transit cannot take stops; the stop list already explains why nothing is planned.
-    if (mode === 'transit' && context.stops > 0) return;
-    const current =
-      lastRequestedQuery.current === activeQuery.current && lastRequestedMode.current === mode;
-    if (!current) void routeAction.current(mode);
-  }, [autoPlanToken]);
+    if (planIntent.mode === 'transit' && stopCount.current > 0) return;
+    void routeAction.current(planIntent.mode);
+  }, [planIntent]);
+  useEffect(() => {
+    if (!googleMode || googleStatus !== 'ready') return;
+    // A choice made while the map loaded, or a saved trip restored on opening, plans once.
+    const next = queuedMode.current ?? (restorePending.current ? liveModeRef.current : null);
+    restorePending.current = false;
+    queuedMode.current = null;
+    if (next) void routeAction.current(next);
+  }, [googleMode, googleStatus]);
   useEffect(() => {
     if (googleMode && screen === 'planner' && googleStatus === 'idle') void loadMapAction.current();
   }, [googleMode, googleStatus, provider, screen]);
@@ -1437,7 +1689,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       return;
     const timeout = window.setTimeout(() => {
       if (lastRequestedQuery.current !== activeQuery.current)
-        void routeAction.current(lastRequestedMode.current);
+        void routeAction.current(liveModeRef.current);
     }, 800);
     return () => window.clearTimeout(timeout);
   }, [googleMode, googleStatus, liveQueryFingerprint, routeEditing]);
@@ -1496,7 +1748,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     t,
   ]);
 
-  const googleMapReady = googleStatus === 'ready' || googleStatus === 'routes';
+  const googleMapReady = googleStatus === 'ready';
   // Every alternative is drawn with its outbound time and commute cost, like a directions map.
   const mapLabels = googleMode
     ? Object.fromEntries(
@@ -1518,6 +1770,15 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     start: `${t('start')} · ${shortPlace(state.origin.label)}`,
     end: `${t('finish')} · ${shortPlace(state.destination.label)}`,
   });
+  /** Route framing keeps clear of the controls actually drawn over the top of the phone map. */
+  const mobileMapPadding = () => {
+    const map = googleMapRef.current?.getBoundingClientRect();
+    const top = mobileTopRef.current?.getBoundingClientRect();
+    return {
+      ...MOBILE_MAP_PADDING,
+      ...(map && top && top.bottom > map.top ? { top: Math.round(top.bottom - map.top + 16) } : {}),
+    };
+  };
   const routeSelectAction = useRef<(id: string) => void>(() => undefined);
   routeSelectAction.current = (id) => {
     const result = comparison.result?.results.find((candidate) => candidate.id === id);
@@ -1530,7 +1791,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       labels: JSON.parse(mapLabelsKey) as Record<string, string>,
       onSelect: (id) => routeSelectAction.current(id),
       endpoints: JSON.parse(endpointLabels) as { start: string; end: string },
-      ...(isMobile ? { padding: MOBILE_MAP_PADDING } : {}),
+      ...(isMobile ? { padding: mobileMapPadding() } : {}),
     });
   }, [
     googleMode,
@@ -1883,8 +2144,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       locale={locale}
       roundTrip={state.settings.roundTrip}
       locationContext={JSON.stringify([state.origin, state.destination])}
-      departureTime={state.leaveNow ? new Date() : new Date(state.departure)}
-      returnTime={state.returnTime ? new Date(state.returnTime) : undefined}
+      departureTime={new Date(departureAt ?? Date.now())}
+      returnTime={returnAt !== undefined ? new Date(returnAt) : undefined}
       onApply={(outboundFare, returnFare) => {
         setATFareContexts((current) => ({
           ...current,
@@ -2291,6 +2552,177 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     );
   };
 
+  /** Swaps places and reverses driving stops; departure and return times stay as they are. */
+  const swapPlaces = () =>
+    setState((current) => ({
+      ...current,
+      origin: current.destination,
+      destination: current.origin,
+      options: current.options.map((option) =>
+        option.mode === 'drive' && !hasGoogleProvenance(option)
+          ? { ...option, waypoints: [...option.waypoints].reverse() }
+          : option,
+      ),
+    }));
+  const renderStopovers = () =>
+    googleMode &&
+    drivingPreference &&
+    (editingMode === 'drive' || drivingStops.length > 0) && (
+      <section className="sc-stopovers" aria-label={t('waypoints')}>
+        <div className="sc-stopover-heading">
+          <h3>{t('waypoints')}</h3>
+          <span>{drivingStops.length}/10</span>
+        </div>
+        {drivingStops.length > 1 && <p className="sc-help">{t('stopoverHelp')}</p>}
+        {drivingStops.length > 0 && (
+          <ol className="sc-stopover-list">
+            {drivingStops.map((place, index) => (
+              <li key={`${index}-${place.label}`}>
+                <span className="sc-stopover-number" aria-hidden="true">
+                  {index + 1}
+                </span>
+                <span className="sc-stopover-label">{place.label}</span>
+                <div className="sc-stopover-controls">
+                  <button
+                    className="sc-icon-button"
+                    aria-label={`${t('moveStopoverUp')} ${place.label}`}
+                    disabled={index === 0}
+                    onClick={() => moveDrivingStop(index, -1)}
+                  >
+                    <ArrowUp size={15} />
+                  </button>
+                  <button
+                    className="sc-icon-button"
+                    aria-label={`${t('moveStopoverDown')} ${place.label}`}
+                    disabled={index === drivingStops.length - 1}
+                    onClick={() => moveDrivingStop(index, 1)}
+                  >
+                    <ArrowDown size={15} />
+                  </button>
+                  <button
+                    className="sc-icon-button"
+                    aria-label={`${t('removeWaypoint')} ${place.label}`}
+                    onClick={() =>
+                      updateOption(drivingPreference.id, {
+                        waypoints: drivingStops.filter((_, item) => item !== index),
+                      })
+                    }
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+        {stopoverSearchOpen && editingMode === 'drive' ? (
+          <div className="sc-stopover-search">
+            <div className="sc-field sc-live-address">
+              <span>{t('stopoverSearch')}</span>
+              <div ref={stopoverSearchRef} />
+            </div>
+            <div className="sc-stopover-search-actions">
+              <button
+                className="sc-small-button"
+                disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
+                onClick={() => appendDrivingStop(stopoverDraft)}
+              >
+                <Plus size={15} />
+                {t('addStopover')}
+              </button>
+              <button
+                className="sc-icon-button"
+                aria-label={t('cancelStopoverSearch')}
+                onClick={() => {
+                  setStopoverSearchOpen(false);
+                  setStopoverDraft({ label: '' });
+                }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <button
+              className="sc-text-button sc-stopover-add"
+              onClick={() => {
+                setStopoverDraft({ label: '' });
+                setStopoverSearchOpen(true);
+              }}
+              disabled={
+                editingMode !== 'drive' || drivingStops.length >= 10 || !addressSearchEnabled
+              }
+            >
+              <Plus size={16} />
+              {t('addStopover')}
+            </button>
+            {/* Phones have no map toolbar; the route page offers the map pick here. */}
+            {isMobile && (
+              <button
+                className="sc-text-button sc-stopover-add"
+                onClick={beginMapStopoverPick}
+                disabled={
+                  googleStatus !== 'ready' || editingMode !== 'drive' || drivingStops.length >= 10
+                }
+              >
+                <MapPin size={16} />
+                {t('pickStopoverOnMap')}
+              </button>
+            )}
+          </>
+        )}
+        {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
+        {stopoverRoutingBlocked && (
+          <p className="sc-error" role="status">
+            {t('transitStopoverUnsupported')}
+          </p>
+        )}
+      </section>
+    );
+  const renderSavedPlaces = () =>
+    state.places.length > 0 && (
+      <details className="sc-saved-places">
+        <summary>
+          {t('savedPlaces')}
+          <ChevronDown size={15} />
+        </summary>
+        {state.places.map((place) => (
+          <div className="sc-saved-place" key={place.label}>
+            <span>{place.label}</span>
+            <button
+              className="sc-icon-button"
+              title={t('applyOrigin')}
+              aria-label={`${t('applyOrigin')} ${place.label}`}
+              onClick={() => setState((current) => ({ ...current, origin: place }))}
+            >
+              <House size={15} />
+            </button>
+            <button
+              className="sc-icon-button"
+              title={t('applyDestination')}
+              aria-label={`${t('applyDestination')} ${place.label}`}
+              onClick={() => setState((current) => ({ ...current, destination: place }))}
+            >
+              <MapPin size={15} />
+            </button>
+            <button
+              className="sc-icon-button"
+              aria-label={`${t('removePlace')} ${place.label}`}
+              onClick={() =>
+                setState((current) => ({
+                  ...current,
+                  places: current.places.filter((saved) => saved.label !== place.label),
+                }))
+              }
+            >
+              <X size={15} />
+            </button>
+          </div>
+        ))}
+      </details>
+    );
+
   const renderLocationSection = () => (
     <section className="sc-input-section">
       <h2 id={`${plannerId}-journey`} className="sc-visually-hidden">
@@ -2298,141 +2730,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       </h2>
       <div className="sc-location-fields">
         {renderLocationRow('origin')}
-        {googleMode &&
-          drivingPreference &&
-          (editingMode === 'drive' || drivingStops.length > 0) && (
-            <section className="sc-stopovers" aria-label={t('waypoints')}>
-              <div className="sc-stopover-heading">
-                <h3>{t('waypoints')}</h3>
-                <span>{drivingStops.length}/10</span>
-              </div>
-              {drivingStops.length > 1 && <p className="sc-help">{t('stopoverHelp')}</p>}
-              {drivingStops.length > 0 && (
-                <ol className="sc-stopover-list">
-                  {drivingStops.map((place, index) => (
-                    <li key={`${index}-${place.label}`}>
-                      <span className="sc-stopover-number" aria-hidden="true">
-                        {index + 1}
-                      </span>
-                      <span className="sc-stopover-label">{place.label}</span>
-                      <div className="sc-stopover-controls">
-                        <button
-                          className="sc-icon-button"
-                          aria-label={`${t('moveStopoverUp')} ${place.label}`}
-                          disabled={index === 0}
-                          onClick={() => moveDrivingStop(index, -1)}
-                        >
-                          <ArrowUp size={15} />
-                        </button>
-                        <button
-                          className="sc-icon-button"
-                          aria-label={`${t('moveStopoverDown')} ${place.label}`}
-                          disabled={index === drivingStops.length - 1}
-                          onClick={() => moveDrivingStop(index, 1)}
-                        >
-                          <ArrowDown size={15} />
-                        </button>
-                        <button
-                          className="sc-icon-button"
-                          aria-label={`${t('removeWaypoint')} ${place.label}`}
-                          onClick={() =>
-                            updateOption(drivingPreference.id, {
-                              waypoints: drivingStops.filter((_, item) => item !== index),
-                            })
-                          }
-                        >
-                          <X size={15} />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {stopoverSearchOpen && editingMode === 'drive' ? (
-                <div className="sc-stopover-search">
-                  <div className="sc-field sc-live-address">
-                    <span>{t('stopoverSearch')}</span>
-                    <div ref={stopoverSearchRef} />
-                  </div>
-                  <div className="sc-stopover-search-actions">
-                    <button
-                      className="sc-small-button"
-                      disabled={!stopoverDraft.label.trim() || drivingStops.length >= 10}
-                      onClick={() => appendDrivingStop(stopoverDraft)}
-                    >
-                      <Plus size={15} />
-                      {t('addStopover')}
-                    </button>
-                    <button
-                      className="sc-icon-button"
-                      aria-label={t('cancelStopoverSearch')}
-                      onClick={() => {
-                        setStopoverSearchOpen(false);
-                        setStopoverDraft({ label: '' });
-                      }}
-                    >
-                      <X size={16} />
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <button
-                    className="sc-text-button sc-stopover-add"
-                    onClick={() => {
-                      setStopoverDraft({ label: '' });
-                      setStopoverSearchOpen(true);
-                    }}
-                    disabled={
-                      editingMode !== 'drive' || drivingStops.length >= 10 || !addressSearchEnabled
-                    }
-                  >
-                    <Plus size={16} />
-                    {t('addStopover')}
-                  </button>
-                  {/* Phones have no map toolbar; the route page offers the map pick here. */}
-                  {isMobile && (
-                    <button
-                      className="sc-text-button sc-stopover-add"
-                      onClick={beginMapStopoverPick}
-                      disabled={
-                        googleStatus !== 'ready' ||
-                        editingMode !== 'drive' ||
-                        drivingStops.length >= 10
-                      }
-                    >
-                      <MapPin size={16} />
-                      {t('pickStopoverOnMap')}
-                    </button>
-                  )}
-                </>
-              )}
-              {drivingStops.length >= 10 && <p className="sc-help">{t('stopoverLimit')}</p>}
-              {stopoverRoutingBlocked && (
-                <p className="sc-error" role="status">
-                  {t('transitStopoverUnsupported')}
-                </p>
-              )}
-            </section>
-          )}
+        {renderStopovers()}
         {renderLocationRow('destination')}
         {renderDestinationHours()}
-        <button
-          className="sc-swap"
-          aria-label={t('swap')}
-          onClick={() =>
-            setState((current) => ({
-              ...current,
-              origin: current.destination,
-              destination: current.origin,
-              options: current.options.map((option) =>
-                option.mode === 'drive' && !hasGoogleProvenance(option)
-                  ? { ...option, waypoints: [...option.waypoints].reverse() }
-                  : option,
-              ),
-            }))
-          }
-        >
+        <button className="sc-swap" aria-label={t('swap')} onClick={swapPlaces}>
           <ArrowDownUp size={16} />
         </button>
       </div>
@@ -2460,49 +2761,109 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       {(!googleMode || !googleResponse) && (
         <p className="sc-help">{t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}</p>
       )}
-      {state.places.length > 0 && (
-        <details className="sc-saved-places">
-          <summary>
-            {t('savedPlaces')}
-            <ChevronDown size={15} />
-          </summary>
-          {state.places.map((place) => (
-            <div className="sc-saved-place" key={place.label}>
-              <span>{place.label}</span>
-              <button
-                className="sc-icon-button"
-                title={t('applyOrigin')}
-                aria-label={`${t('applyOrigin')} ${place.label}`}
-                onClick={() => setState((current) => ({ ...current, origin: place }))}
-              >
-                <House size={15} />
-              </button>
-              <button
-                className="sc-icon-button"
-                title={t('applyDestination')}
-                aria-label={`${t('applyDestination')} ${place.label}`}
-                onClick={() => setState((current) => ({ ...current, destination: place }))}
-              >
-                <MapPin size={15} />
-              </button>
-              <button
-                className="sc-icon-button"
-                aria-label={`${t('removePlace')} ${place.label}`}
-                onClick={() =>
-                  setState((current) => ({
-                    ...current,
-                    places: current.places.filter((saved) => saved.label !== place.label),
-                  }))
-                }
-              >
-                <X size={15} />
-              </button>
-            </div>
-          ))}
-        </details>
-      )}
+      {renderSavedPlaces()}
     </section>
   );
+
+  const editTime = (patch: Partial<PlannerState>) =>
+    // Editing a time is the confirmation that it is meant as an Auckland time.
+    setState((current) => ({ ...current, ...patch, timesNeedReview: false }));
+  const renderFoldChoice = (field: 'departure' | 'return') => {
+    const entry = field === 'departure' ? departureEntry : returnEntry;
+    if (entry.resolution.kind !== 'ambiguous') return null;
+    const key = field === 'departure' ? 'departureFold' : 'returnFold';
+    return (
+      <fieldset className="sc-fold-choice">
+        <legend>{t('timeRepeated')}</legend>
+        {(['earlier', 'later'] as const).map((fold) => (
+          <label className="sc-checkbox" key={fold}>
+            <input
+              type="radio"
+              name={`${plannerId}-${field}-fold`}
+              checked={state[key] === fold}
+              onChange={() => editTime({ [key]: fold })}
+            />
+            <span>{t(fold === 'earlier' ? 'timeRepeatedEarlier' : 'timeRepeatedLater')}</span>
+          </label>
+        ))}
+      </fieldset>
+    );
+  };
+  const returnFieldError = returnTimeMissing
+    ? t('googleMissingReturn')
+    : returnInvalid
+      ? timeError(returnEntry, state.returnTime, 'googleMissingReturn')
+      : returnBeforeDeparture
+        ? t('returnBeforeDeparture')
+        : undefined;
+  /** Date and time fields with their Auckland-time rules; shared by the wide and phone layouts. */
+  const renderTimeFields = () => (
+    <>
+      {(!state.leaveNow || showReturnTime) && (
+        <div className="sc-field-grid">
+          {!state.leaveNow && (
+            <TextField
+              type="datetime-local"
+              label={t('departure')}
+              value={state.departure}
+              onChange={(departure) => editTime({ departure, departureFold: undefined })}
+              error={
+                departureInvalid
+                  ? timeError(departureEntry, state.departure, 'departureRequired')
+                  : undefined
+              }
+            />
+          )}
+          {showReturnTime && (
+            <TextField
+              type="datetime-local"
+              label={t('returnTime')}
+              value={state.returnTime}
+              onChange={(returnTime) => editTime({ returnTime, returnFold: undefined })}
+              error={returnFieldError}
+            />
+          )}
+        </div>
+      )}
+      {!state.leaveNow && renderFoldChoice('departure')}
+      {showReturnTime && renderFoldChoice('return')}
+      {timesNeedReview && (
+        <div className="sc-times-review" role="alert">
+          <p>{t('timesNeedReview')}</p>
+          <button className="sc-small-button" onClick={() => editTime({})}>
+            {t('timesConfirm')}
+          </button>
+        </div>
+      )}
+      <p
+        className={`sc-help ${browserTimeZone !== AUCKLAND_TIME_ZONE ? 'sc-timezone-warning' : ''}`}
+      >
+        {t('aucklandTimeNote')}
+        {browserTimeZone !== AUCKLAND_TIME_ZONE &&
+          ` ${t('browserZoneDiffers', { zone: browserTimeZone })}`}
+      </p>
+    </>
+  );
+  const renderReturnPolicy = () =>
+    googleMode &&
+    state.settings.roundTrip && (
+      <div className="sc-field sc-return-policy">
+        <label htmlFor={`${plannerId}-return-policy`}>{t('returnPolicyLabel')}</label>
+        <select
+          id={`${plannerId}-return-policy`}
+          value={state.returnPolicy}
+          onChange={(event) =>
+            editTime({ returnPolicy: event.target.value as PlannerState['returnPolicy'] })
+          }
+        >
+          <option value="estimate">{t('returnPolicyEstimate')}</option>
+          <option value="scheduled">{t('returnPolicyScheduled')}</option>
+        </select>
+        {state.returnPolicy === 'estimate' && (
+          <small className="sc-help">{t('returnEstimateNote')}</small>
+        )}
+      </div>
+    );
 
   const renderScheduleSection = () => (
     <section className="sc-input-section sc-schedule">
@@ -2526,34 +2887,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <span>{t('leaveNow')}</span>
         </label>
       </div>
-      {(!state.leaveNow || showReturnTime) && (
-        <div className="sc-field-grid">
-          {!state.leaveNow && (
-            <TextField
-              type="datetime-local"
-              label={t('departure')}
-              value={state.departure}
-              onChange={(departure) => setState((current) => ({ ...current, departure }))}
-              error={departureInvalid ? t('departureRequired') : undefined}
-            />
-          )}
-          {showReturnTime && (
-            <TextField
-              type="datetime-local"
-              label={t('returnTime')}
-              value={state.returnTime}
-              onChange={(returnTime) => setState((current) => ({ ...current, returnTime }))}
-              error={returnTimeMissing ? t('googleMissingReturn') : undefined}
-            />
-          )}
-        </div>
-      )}
-      <p
-        className={`sc-help ${browserTimeZone !== 'Pacific/Auckland' ? 'sc-timezone-warning' : ''}`}
-      >
-        {t('browserTimezone', { zone: browserTimeZone })}
-        {browserTimeZone !== 'Pacific/Auckland' && ` ${t('aucklandTimeHint')}`}
-      </p>
+      {renderReturnPolicy()}
+      {renderTimeFields()}
     </section>
   );
 
@@ -2567,8 +2902,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           key={mode}
           className={editingMode === mode ? 'is-active' : ''}
           onClick={() => {
+            if (googleMode && mode !== 'hybrid') {
+              switchLiveMode(mode);
+              return;
+            }
             setEditingMode(mode);
-            if (googleMode && mode !== editingMode) setAutoPlanToken((count) => count + 1);
             // Keep the summary and schematic on the option being edited.
             const edited = comparison.result?.results.find((result) => result.mode === mode);
             if (!googleMode && edited && selected?.mode !== mode) selectResult(edited);
@@ -2582,23 +2920,30 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     </div>
   );
 
+  /** Shows the other mode at once: its cached result, or a request when the places are complete. */
+  const switchLiveMode = (mode: LiveMode) => {
+    if (mode === editingMode) return;
+    setEditingMode(mode);
+    requestPlan(mode);
+  };
+
   // Phones confirm the route page from its footer, so the inline plan button is left out there.
   const renderRoutingActions = (showPlanButton: boolean) => (
     <div className="sc-routing-actions">
       {showPlanButton && (
         <button
           className="sc-primary-button sc-full-width"
-          onClick={() => void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')}
-          disabled={
-            googleStatus !== 'ready' ||
-            comparison.error ||
-            stopoverRoutingBlocked ||
-            departureInvalid ||
-            returnTimeMissing
-          }
+          onClick={() => void getGoogleRoutes(liveMode, { force: true })}
+          disabled={planDisabled}
         >
           <Route size={16} />
-          {t(googleStatus === 'routes' ? 'googleRoutesLoading' : 'planRoute')}
+          {t(
+            routeLoading
+              ? 'googleRoutesLoading'
+              : addressResolving
+                ? 'addressResolving'
+                : 'planRoute',
+          )}
         </button>
       )}
       {googleError && (
@@ -2820,7 +3165,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 {t('googleLoading')}
               </div>
             )}
-            {!compact && googleStatus === 'routes' && (
+            {!compact && routeLoading && (
               <p className="sc-help" role="status">
                 {t('googleRoutesLoading')}
               </p>
@@ -3029,11 +3374,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             <p>{t('noResults')}</p>
           </div>
         )}
-        {!comparison.error && !comparison.result && (
-          <div className="sc-empty-state">
-            <h3>{t(googleMode ? 'planRoutePrompt' : noComparableRoutesKey)}</h3>
-          </div>
-        )}
+        {!comparison.error && !comparison.result && renderRouteStatus('sc-empty-state')}
         {shownCards.length > 0 && (
           <ol className="sc-option-list">
             {shownCards.map((result) => {
@@ -3568,6 +3909,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 origin: toLocation(props.origin ?? '4 Fong Road, Auckland'),
                 destination: toLocation(props.destination),
                 settings: { ...DEFAULT_SETTINGS },
+                returnPolicy: 'estimate',
                 options: createExampleOptions(),
                 places: [],
                 savedRoutes: [],
@@ -3651,8 +3993,165 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     </section>
   );
 
+  type StatusAction =
+    | 'plan'
+    | 'retry'
+    | 'edit'
+    | 'changeTime'
+    | 'switchMode'
+    | 'manual'
+    | 'oneWay'
+    | 'estimate'
+    | 'removeStops'
+    | 'drive'
+    | 'costs';
+  const routeStatusView = (): { title: string; alert?: boolean; actions: StatusAction[] } => {
+    if (originMissing) return { title: t('routeNeedOrigin'), actions: ['edit'] };
+    if (destinationMissing) return { title: t('mobileWhereTo'), actions: ['edit'] };
+    if (comparison.error) return { title: t('validationSummary'), alert: true, actions: ['edit'] };
+    if (!googleMode)
+      return {
+        title: t(noComparableRoutesKey),
+        actions: comparison.pendingFareOptions.length ? ['costs'] : [],
+      };
+    if (stopoverRoutingBlocked)
+      // Wide screens explain this inside the stop list.
+      return isMobile
+        ? { title: t('transitStopoverUnsupported'), alert: true, actions: ['removeStops', 'drive'] }
+        : { title: t('mobileFixInputs'), actions: ['removeStops', 'drive'] };
+    if (timesBlocked)
+      return {
+        title: t(timesNeedReview ? 'timesNeedReview' : 'mobileFixInputs'),
+        alert: true,
+        actions: ['changeTime'],
+      };
+    if (googleStatus !== 'ready') return { title: t('googleLoading'), actions: [] };
+    const status = currentRouteStatus;
+    if (status.state === 'loading')
+      return {
+        title: t(status.mode === 'transit' ? 'routeLoadingTransit' : 'routeLoadingDrive'),
+        actions: [],
+      };
+    if (status.state === 'no-routes')
+      return {
+        title: t(status.mode === 'transit' ? 'routeNoTransit' : 'routeNoDrive'),
+        actions: ['changeTime', 'switchMode', 'retry'],
+      };
+    if (status.state === 'error')
+      // Wide screens show the full error beside the plan button; this only marks the state.
+      return isMobile
+        ? { title: googleError || t('googleError'), alert: true, actions: ['retry', 'manual'] }
+        : { title: t('routeErrorShort'), actions: ['retry', 'manual'] };
+    if (status.state === 'success') {
+      if (googleResponse?.returnStatus === 'no-routes')
+        return { title: t('returnNoRoutes'), actions: ['changeTime', 'oneWay', 'estimate'] };
+      if (comparison.pendingFareOptions.length)
+        return { title: t('farePendingNotice'), actions: ['costs'] };
+      return { title: t(noComparableRoutesKey), actions: ['costs'] };
+    }
+    return { title: t('routeReady'), actions: ['plan'] };
+  };
+  const otherLiveMode: LiveMode = liveMode === 'drive' ? 'transit' : 'drive';
+  const statusActionLabel = (action: StatusAction) =>
+    action === 'plan'
+      ? t('planRoute')
+      : action === 'retry'
+        ? t('routeRetry')
+        : action === 'edit'
+          ? t(destinationMissing ? 'mobileChooseDestination' : 'mobileEditRoute')
+          : action === 'changeTime'
+            ? t('routeChangeTime')
+            : action === 'switchMode'
+              ? t('routeSwitchMode', { mode: t(otherLiveMode) })
+              : action === 'manual'
+                ? t('routeUseManual')
+                : action === 'oneWay'
+                  ? t('returnUseOneWay')
+                  : action === 'estimate'
+                    ? t('returnUseEstimate')
+                    : action === 'removeStops'
+                      ? t('removeStopsContinue')
+                      : action === 'drive'
+                        ? t('switchToDrive')
+                        : t('adjustCosts');
+  const runStatusAction = (action: StatusAction) => {
+    if (action === 'plan') void getGoogleRoutes(liveMode);
+    else if (action === 'retry') void getGoogleRoutes(liveMode, { force: true });
+    else if (action === 'edit' || action === 'changeTime') {
+      if (isMobile) openPage('route');
+      if (action === 'changeTime' && isMobile) setSchedulePanelOpen(true);
+    } else if (action === 'switchMode') switchLiveMode(otherLiveMode);
+    else if (action === 'manual') setManualRequested(true);
+    else if (action === 'oneWay' || action === 'estimate') {
+      // Either choice needs only the outbound route, so plan it straight away.
+      if (action === 'oneWay') updateSettings({ roundTrip: false });
+      else editTime({ returnPolicy: 'estimate' });
+      requestPlan(liveMode);
+    } else if (action === 'removeStops') {
+      if (drivingPreference) updateOption(drivingPreference.id, { waypoints: [] });
+      requestPlan('transit');
+    } else if (action === 'drive') switchLiveMode('drive');
+    else if (isMobile) openPage('costs');
+  };
+  /** The status line and its next steps; wide screens already show the inputs and plan button. */
+  const renderRouteStatus = (className: string) => {
+    const view = routeStatusView();
+    const actions = view.actions.filter(
+      (action) => isMobile || !['plan', 'edit', 'changeTime', 'costs'].includes(action),
+    );
+    return (
+      <div className={className} role={view.alert ? 'alert' : 'status'}>
+        <h3>
+          {routeLoading && <span className="sc-spinner" aria-hidden="true" />}
+          {view.title}
+        </h3>
+        {actions.length > 0 && (
+          <div className="sc-status-actions">
+            {actions.map((action, index) => (
+              <button
+                key={action}
+                className={index === 0 ? 'sc-primary-button' : 'sc-small-button'}
+                onClick={() => runStatusAction(action)}
+                disabled={action === 'plan' && planDisabled}
+              >
+                {statusActionLabel(action)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const arrivalAt =
+    selected && departureAt !== undefined
+      ? departureAt + selected.breakdown.outbound.totalMinutes * 60000
+      : undefined;
+  const returnBeforeArrival =
+    returnAt !== undefined && arrivalAt !== undefined && returnAt < arrivalAt;
   const renderBanners = () => (
     <>
+      {returnBeforeArrival && (
+        <p className="sc-connection-banner sc-incomplete-warning" role="alert">
+          <Info size={16} />
+          {t('returnBeforeArrival', { time: aucklandClock.format(arrivalAt) })}
+        </p>
+      )}
+      {comparison.pendingFareOptions.length > 0 && (
+        <section className="sc-connection-banner sc-incomplete-warning" role="status">
+          <Info size={16} />
+          <div>
+            <p>{t('farePendingNotice')}</p>
+            <ul>
+              {comparison.pendingFareOptions.map((option) => (
+                <li key={option.id}>
+                  <strong>{nameOf(option)}</strong>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
       {!online && (
         <p className="sc-connection-banner" role="status">
           <WifiOff size={16} />
@@ -3719,7 +4218,13 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
 
   // Phone layout: the map stays mounted; route, costs and reading pages open over it.
   const pickingActive = mapDestinationPicking || mapStopoverPicking;
-  const layerDepth = isMobile ? pages.length + (pickingActive ? 1 : 0) : 0;
+  // Each open layer has a history entry, so the system back button closes the top one first.
+  const layerDepth = isMobile
+    ? pages.length +
+      (pickingActive ? 1 : 0) +
+      (routeEditing && schedulePanelOpen ? 1 : 0) +
+      (routeEditing && searchField ? 1 : 0)
+    : 0;
   const historyDepth = useRef(
     typeof window === 'undefined' ? 0 : historyLayer(window.history.state),
   );
@@ -3764,7 +4269,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const openPage = (page: MobilePage) => {
     if (pages[pages.length - 1] === page) return;
     if (pickingActive) cancelMapPick();
-    if (page === 'route')
+    if (page === 'route') {
       routeDraft.current = {
         fingerprint: liveQueryFingerprint,
         origin: state.origin,
@@ -3772,12 +4277,20 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         leaveNow: state.leaveNow,
         departure: state.departure,
         returnTime: state.returnTime,
+        returnPolicy: state.returnPolicy,
+        departureFold: state.departureFold,
+        returnFold: state.returnFold,
+        timesNeedReview: state.timesNeedReview,
         roundTrip: state.settings.roundTrip,
         options: state.options,
         googleResponse,
         selectedId: selected?.id ?? selectedId,
         editingMode,
       };
+      setSearchField(null);
+      setSchedulePanelOpen(false);
+      setRoutePanel(null);
+    }
     // The cost page edits the option whose total it shows.
     if (page === 'costs' && selected) setEditingMode(selected.mode);
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -3794,6 +4307,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       leaveNow: draft.leaveNow,
       departure: draft.departure,
       returnTime: draft.returnTime,
+      returnPolicy: draft.returnPolicy,
+      departureFold: draft.departureFold,
+      returnFold: draft.returnFold,
+      timesNeedReview: draft.timesNeedReview,
       settings: { ...current.settings, roundTrip: draft.roundTrip },
       options: draft.options,
     }));
@@ -3801,11 +4318,22 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     setSelectedId(draft.selectedId);
     setEditingMode(draft.editingMode);
   };
-  /** Closes map picking first, then pages from the top; an unconfirmed route edit is undone. */
+  /**
+   * Closes layers from the top: a map pick, then the time panel, then address search, then
+   * pages. Leaving the route page without confirming undoes its edits.
+   */
   const closeLayers = (count: number) => {
     let remaining = count;
     if (pickingActive && remaining > 0) {
       cancelMapPick();
+      remaining -= 1;
+    }
+    if (routeEditing && schedulePanelOpen && remaining > 0) {
+      setSchedulePanelOpen(false);
+      remaining -= 1;
+    }
+    if (routeEditing && searchField && remaining > 0) {
+      setSearchField(null);
       remaining -= 1;
     }
     if (remaining <= 0) return;
@@ -3815,6 +4343,8 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       routeDraft.current = null;
       setStopoverSearchOpen(false);
       setStopoverDraft({ label: '' });
+      setSearchField(null);
+      setSchedulePanelOpen(false);
     }
     pageFocus.current = pageOpeners.current[kept.length] ?? null;
     pageOpeners.current = pageOpeners.current.slice(0, kept.length);
@@ -3822,20 +4352,20 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   };
   const closeLayersAction = useRef(closeLayers);
   closeLayersAction.current = closeLayers;
-  // Each page or map pick has a history entry, so the system back button closes it first.
   const goBack = () => {
     if (historyDepth.current > 0) window.history.back();
     else closeLayers(1);
   };
   const confirmRoute = () => {
     routeDraft.current = null;
-    const mode = editingMode === 'transit' ? 'transit' : 'drive';
-    const planned =
-      Boolean(googleResponse) &&
-      lastRequestedQuery.current === activeQuery.current &&
-      lastRequestedMode.current === mode;
-    goBack();
-    if (googleMode && !planned) void getGoogleRoutes(mode);
+    if (historyDepth.current > 0) window.history.go(-(layerDepth - pages.length + 1));
+    else {
+      setSearchField(null);
+      setSchedulePanelOpen(false);
+      closeLayers(1);
+    }
+    // A result cached for the confirmed conditions comes back without a new request.
+    if (googleMode) void getGoogleRoutes(liveMode);
   };
   useEffect(() => {
     const current = historyDepth.current;
@@ -3892,75 +4422,87 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     (googleStatus !== 'ready' ||
       comparison.error ||
       stopoverRoutingBlocked ||
-      departureInvalid ||
-      returnTimeMissing);
+      timesBlocked ||
+      addressResolving > 0);
+  // Times later than today carry their date so a summary never reads as today by mistake.
+  const shortWhen = (instant: number) =>
+    aucklandDay.format(instant) === aucklandDay.format(currentMinute * 60000)
+      ? aucklandClock.format(instant)
+      : `${new Intl.DateTimeFormat(locale === 'zh-CN' ? 'zh-CN' : 'en-NZ', {
+          timeZone: AUCKLAND_TIME_ZONE,
+          month: 'short',
+          day: 'numeric',
+        }).format(instant)} ${aucklandClock.format(instant)}`;
+  const tripSummary = () => {
+    const leaving =
+      state.leaveNow || departureAt === undefined ? undefined : shortWhen(departureAt);
+    if (!state.settings.roundTrip)
+      return leaving ? t('tripAtOneWay', { time: leaving }) : t('tripNowOneWay');
+    if (googleMode && state.returnPolicy === 'scheduled' && returnAt !== undefined) {
+      const back = shortWhen(returnAt);
+      return leaving
+        ? t('tripAtReturnAt', { time: leaving, return: back })
+        : t('tripNowReturnAt', { time: back });
+    }
+    if (googleMode) return leaving ? t('tripAtEstimate', { time: leaving }) : t('tripNowEstimate');
+    return `${leaving ?? t('leaveNow')} · ${tripScope}`;
+  };
 
-  const renderRouteCard = () => (
-    <div className="sc-mobile-top">
+  const renderMapTop = () => (
+    <div className="sc-mobile-top" ref={mobileTopRef}>
       <button className="sc-route-card" onClick={() => openPage('route')}>
         <span className="sc-visually-hidden">{t('mobileEditRoute')}: </span>
-        {hasDestination ? (
-          <>
+        <span className="sc-route-card-text">
+          {hasDestination ? (
             <span className="sc-route-card-places">
               <span>{shortPlace(state.origin.label) || t('origin')}</span>
               <ArrowRight size={14} aria-hidden="true" />
               <strong>{shortPlace(state.destination.label)}</strong>
             </span>
-            <span className="sc-route-card-meta">
-              {[
-                t(selected?.mode ?? editingMode),
-                state.leaveNow || departureAt === undefined
-                  ? t('leaveNow')
-                  : aucklandClock.format(departureAt),
-                tripScope,
-              ].join(' · ')}
+          ) : (
+            <span className="sc-route-card-empty">
+              <MapPin size={17} aria-hidden="true" />
+              {t('mobileWhereTo')}
             </span>
-          </>
-        ) : (
-          <span className="sc-route-card-empty">
-            <MapPin size={17} aria-hidden="true" />
-            {t('mobileWhereTo')}
-          </span>
-        )}
+          )}
+          <span className="sc-route-card-meta">{tripSummary()}</span>
+        </span>
+        <ChevronRight size={18} aria-hidden="true" />
       </button>
-      <button
-        className="sc-map-button"
-        aria-label={t('settings')}
-        onClick={() => openPage('settings')}
-      >
-        <SettingsIcon size={20} />
-      </button>
-    </div>
-  );
-
-  const renderMapTools = () => (
-    <div className="sc-map-fabs" role="group" aria-label={t('mobileMapTools')}>
-      <button
-        className="sc-map-button"
-        aria-label={t(locationLoading ? 'locating' : 'useLocation')}
-        onClick={useLocation}
-        disabled={locationLoading}
-      >
-        <LocateFixed size={20} />
-      </button>
-      {googleMode && (
-        <button
-          className="sc-map-button"
-          aria-label={t('pickDestinationOnMap')}
-          onClick={beginMapDestinationPick}
-          disabled={googleStatus !== 'ready'}
-        >
-          <MapPin size={20} />
+      <div className="sc-map-tools" role="group" aria-label={t('mobileMapTools')}>
+        <button className="sc-map-tool" onClick={() => openPage('settings')}>
+          <SettingsIcon size={18} aria-hidden="true" />
+          <span>{t('settings')}</span>
         </button>
-      )}
-      <button
-        className="sc-map-button"
-        aria-label={t('weatherTitle')}
-        aria-expanded={weatherOpen}
-        onClick={() => setWeatherOpen((open) => !open)}
-      >
-        <CloudSun size={20} />
-      </button>
+        <button
+          className="sc-map-tool"
+          onClick={useLocation}
+          disabled={locationLoading}
+          title={t('useLocation')}
+        >
+          <LocateFixed size={18} aria-hidden="true" />
+          <span>{t(locationLoading ? 'locating' : 'mobileLocate')}</span>
+        </button>
+        {googleMode && (
+          <button
+            className="sc-map-tool"
+            onClick={beginMapDestinationPick}
+            disabled={googleStatus !== 'ready'}
+            title={t('pickDestinationOnMap')}
+          >
+            <MapPin size={18} aria-hidden="true" />
+            <span>{t('mobilePick')}</span>
+          </button>
+        )}
+        <button
+          className="sc-map-tool"
+          aria-expanded={weatherOpen}
+          onClick={() => setWeatherOpen((open) => !open)}
+        >
+          <CloudSun size={18} aria-hidden="true" />
+          <span>{t('mobileWeather')}</span>
+        </button>
+      </div>
     </div>
   );
 
@@ -3974,89 +4516,53 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     </div>
   );
 
-  const renderSheetSummary = () => {
-    if (googleMode && googleStatus === 'routes')
-      return (
-        <p className="sc-sheet-status" role="status">
-          <span className="sc-spinner" aria-hidden="true" />
-          {t('googleRoutesLoading')}
-        </p>
-      );
-    if (selected)
-      return (
-        <div className="sc-sheet-selected">
-          <span className="sc-sheet-name">
-            <ModeIcon mode={selected.mode} size={16} />
-            <span>{cardLabel(selected)}</span>
-          </span>
-          <strong
-            key={valueUpdates}
-            className={`sc-sheet-cost ${selected.totalCostRange ? 'sc-sheet-cost-range' : ''} ${valueUpdates ? 'sc-value-updated' : ''}`}
-            data-testid="selected-cost"
-          >
-            {moneyWithRange(selected.totalCost, selected.totalCostRange)}
-          </strong>
-          <span className="sc-sheet-meta">
-            <span>{tripScope}</span>
-            {` · ${wholeMinutes(selected.totalMinutes)}`}
-            {departureAt !== undefined &&
-              ` · ${clockSpan(departureAt, selected.breakdown.outbound.totalMinutes)}`}
-          </span>
-          <span className="sc-sheet-source">
-            {[
-              resultSource(selected),
-              selected.totalCostRange ? t('fareRangeBadge') : '',
-              selected.warnings.includes('unverified-parking') ? t('parkingWarning') : '',
-            ]
-              .filter(Boolean)
-              .join(' · ')}
-          </span>
-        </div>
-      );
-    return (
-      <div className="sc-sheet-empty">
-        <strong>
-          {!hasDestination
-            ? t('mobileWhereTo')
-            : comparison.error
-              ? t('mobileFixInputs')
-              : googleMode
-                ? t('planRoutePrompt')
-                : t(noComparableRoutesKey)}
-        </strong>
-        {!hasDestination && <p>{t('mobilePlanPrompt')}</p>}
-        <div className="sc-sheet-empty-actions">
-          {hasDestination && googleMode && !comparison.error ? (
-            <>
-              <button
-                className="sc-primary-button"
-                onClick={() =>
-                  void getGoogleRoutes(editingMode === 'transit' ? 'transit' : 'drive')
-                }
-                disabled={routeConfirmBlocked}
-              >
-                <Route size={16} />
-                {t('planRoute')}
-              </button>
-              <button className="sc-small-button" onClick={() => openPage('route')}>
-                {t('mobileEditRoute')}
-              </button>
-            </>
-          ) : (
-            <button className="sc-primary-button" onClick={() => openPage('route')}>
-              <MapPin size={16} />
-              {t(hasDestination ? 'mobileEditRoute' : 'mobileChooseDestination')}
-            </button>
-          )}
-          {googleMode && (
-            <button className="sc-text-button" onClick={() => setManualRequested(true)}>
-              {t('useManualInputs')}
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  };
+  // Drive and public transport stay switchable in every state, including loading and errors.
+  const renderModeBar = () => (
+    <div className="sc-mode-bar" role="group" aria-label={t('chooseMode')}>
+      {(['drive', 'transit'] as const).map((mode) => (
+        <button
+          key={mode}
+          className={liveMode === mode ? 'is-active' : ''}
+          aria-pressed={liveMode === mode}
+          onClick={() => switchLiveMode(mode)}
+        >
+          <ModeIcon mode={mode} size={17} />
+          <span>{t(mode)}</span>
+        </button>
+      ))}
+    </div>
+  );
+
+  const renderSelectedSummary = (result: RouteResult) => (
+    <div className="sc-sheet-selected">
+      <span className="sc-sheet-name">
+        <ModeIcon mode={result.mode} size={16} />
+        <span>{cardLabel(result)}</span>
+      </span>
+      <strong
+        key={valueUpdates}
+        className={`sc-sheet-cost ${result.totalCostRange ? 'sc-sheet-cost-range' : ''} ${valueUpdates ? 'sc-value-updated' : ''}`}
+        data-testid="selected-cost"
+      >
+        {moneyWithRange(result.totalCost, result.totalCostRange)}
+      </strong>
+      <span className="sc-sheet-meta">
+        <span>{tripScope}</span>
+        {` · ${wholeMinutes(result.totalMinutes)}`}
+        {departureAt !== undefined &&
+          ` · ${clockSpan(departureAt, result.breakdown.outbound.totalMinutes)}`}
+      </span>
+      <span className="sc-sheet-source">
+        {[
+          resultSource(result),
+          result.totalCostRange ? t('fareRangeBadge') : '',
+          result.warnings.includes('unverified-parking') ? t('parkingWarning') : '',
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+      </span>
+    </div>
+  );
 
   const renderSheetCards = () => (
     <ol className="sc-option-list sc-sheet-options">
@@ -4101,16 +4607,16 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const sheetSources = new Set(sheetCards.map(resultSource));
   const sharedSheetSource = sheetSources.size === 1 ? [...sheetSources][0] : '';
 
-  // Before there is anything to compare, the sheet is a short prompt with nothing to expand.
+  // Before there is anything to compare, the sheet is a short status with nothing to expand.
   const sheetExpandable = Boolean(comparison.result);
   const sheetNotices =
     !online ||
     comparison.incompleteOptions.length > 0 ||
     comparison.staleFareOptions.length > 0 ||
-    Boolean(googleMode && googleError) ||
+    comparison.pendingFareOptions.length > 0 ||
+    returnBeforeArrival ||
     locationError ||
-    Boolean(props.googleApiKey && !googleMode) ||
-    comparison.error;
+    Boolean(props.googleApiKey && !googleMode);
   const renderSheet = () => (
     <section className="sc-sheet" aria-label={t('mobileSheetLabel')}>
       {sheetExpandable && (
@@ -4144,8 +4650,9 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <span />
         </div>
       )}
+      {googleMode && renderModeBar()}
       <div className="sc-sheet-head">
-        {renderSheetSummary()}
+        {selected ? renderSelectedSummary(selected) : renderRouteStatus('sc-sheet-status-view')}
         {sheetExpandable && (
           <button
             className="sc-icon-button sc-sheet-toggle"
@@ -4161,21 +4668,10 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
       {(sheetExpandable || sheetNotices) && (
         <div id={sheetBodyId} className="sc-sheet-body" hidden={sheetExpandable && !sheetOpen}>
           {renderBanners()}
-          {googleMode && googleError && (
-            <p className="sc-error" role="alert">
-              {googleError}
-            </p>
-          )}
           {locationError && (
             <p role="alert" className="sc-error">
               {t('locationFailed')}
             </p>
-          )}
-          {comparison.error && (
-            <div className="sc-empty-state" role="alert">
-              <h3>{t('validationSummary')}</h3>
-              <p>{t('noResults')}</p>
-            </div>
           )}
           {sheetCards.length > 0 && (
             <>
@@ -4235,6 +4731,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           {sheetCards.length > 0 && (
             <div className="sc-results-notes">
               {sharedSheetSource && <p>{t('sharedSource', { source: sharedSheetSource })}</p>}
+              {estimatedReturn && <p>{t('returnEstimateNote')}</p>}
               {sheetCards.some(
                 (result) =>
                   result.mode === 'drive' && result.warnings.includes('unverified-parking'),
@@ -4243,33 +4740,224 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
             </div>
           )}
           {renderGoogleAttribution()}
-          {googleMode && sheetExpandable && (
-            <button className="sc-text-button" onClick={() => setManualRequested(true)}>
-              {t('useManualInputs')}
-            </button>
-          )}
           {!googleMode && <p className="sc-help">{t('estimatedReturn')}</p>}
         </div>
       )}
     </section>
   );
 
+  // Route page: two compact place rows over the map; searching a place takes the whole page.
+  const renderPlaceRow = (field: 'origin' | 'destination') => {
+    const missing = field === 'origin' ? originMissing : destinationMissing;
+    return (
+      <div
+        className={`sc-place-row ${missing ? 'sc-field-invalid' : ''}`}
+        data-field={field}
+        data-active={searchField === field || undefined}
+        hidden={searchField !== null && searchField !== field}
+        onFocus={() => setSearchField(field)}
+      >
+        <span
+          className={`sc-route-dot ${field === 'destination' ? 'sc-route-dot-end' : ''}`}
+          aria-hidden="true"
+        />
+        {googleMode ? (
+          <div className="sc-place-input sc-live-address">
+            <div ref={field === 'origin' ? originSearchRef : destinationSearchRef} />
+            {!addressSearchEnabled && (
+              <small>{addressSearchPending ? t('googleLoading') : state[field].label}</small>
+            )}
+          </div>
+        ) : (
+          <input
+            className="sc-place-input"
+            aria-label={t(field)}
+            placeholder={t(field)}
+            value={state[field].label}
+            onChange={(event) =>
+              setState((current) => ({ ...current, [field]: { label: event.target.value } }))
+            }
+          />
+        )}
+      </div>
+    );
+  };
+  const applyPlace = (field: 'origin' | 'destination', place: Location) => {
+    setState((current) => ({ ...current, [field]: place }));
+    setSearchField(null);
+    if (historyDepth.current > 0) window.history.back();
+  };
+  const renderSearchActions = (field: 'origin' | 'destination') => (
+    <ul className="sc-search-actions">
+      {field === 'origin' && (
+        <li>
+          <button onClick={useLocation} disabled={locationLoading}>
+            <LocateFixed size={18} aria-hidden="true" />
+            {t(locationLoading ? 'locating' : 'useLocation')}
+          </button>
+        </li>
+      )}
+      {field === 'destination' && googleMode && (
+        <li>
+          <button onClick={beginMapDestinationPick} disabled={googleStatus !== 'ready'}>
+            <MapPin size={18} aria-hidden="true" />
+            {t('mobilePickOnMap')}
+          </button>
+        </li>
+      )}
+      {state.places.map((place) => (
+        <li key={place.label}>
+          <button onClick={() => applyPlace(field, place)}>
+            <Bookmark size={18} aria-hidden="true" />
+            <span>
+              <small>{t('mobileSavedPlaces')}</small>
+              {place.label}
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+  const renderSegmented = <T extends string>(
+    label: MessageKey,
+    value: T,
+    choices: [T, MessageKey][],
+    onChange: (value: T) => void,
+  ) => (
+    <fieldset className="sc-segmented">
+      <legend>{t(label)}</legend>
+      <div>
+        {choices.map(([choice, text]) => (
+          <button key={choice} aria-pressed={value === choice} onClick={() => onChange(choice)}>
+            {t(text)}
+          </button>
+        ))}
+      </div>
+    </fieldset>
+  );
+  const renderSchedulePanel = () => (
+    <div
+      className="sc-schedule-panel"
+      role="dialog"
+      aria-labelledby={`${plannerId}-schedule-title`}
+    >
+      <h2 id={`${plannerId}-schedule-title`}>{t('mobileTimeTitle')}</h2>
+      {renderSegmented(
+        'tripLabel',
+        state.settings.roundTrip ? 'round' : 'one-way',
+        [
+          ['one-way', 'tripOneWay'],
+          ['round', 'tripRoundTrip'],
+        ],
+        (trip) => updateSettings({ roundTrip: trip === 'round' }),
+      )}
+      {renderSegmented(
+        'departureLabel',
+        state.leaveNow ? 'now' : 'at',
+        [
+          ['now', 'departNow'],
+          ['at', 'departAt'],
+        ],
+        (when) => editTime({ leaveNow: when === 'now' }),
+      )}
+      {googleMode &&
+        state.settings.roundTrip &&
+        renderSegmented(
+          'returnPolicyLabel',
+          state.returnPolicy,
+          [
+            ['estimate', 'returnPolicyEstimate'],
+            ['scheduled', 'returnPolicyScheduled'],
+          ],
+          (returnPolicy) => editTime({ returnPolicy }),
+        )}
+      {googleMode && state.settings.roundTrip && state.returnPolicy === 'estimate' && (
+        <p className="sc-help">{t('returnEstimateNote')}</p>
+      )}
+      {renderTimeFields()}
+      <button className="sc-primary-button sc-full-width" onClick={goBack}>
+        {t('mobileDone')}
+      </button>
+    </div>
+  );
+  const renderRoutePage = () => (
+    <>
+      <div className="sc-route-panel" data-searching={searchField ? true : undefined}>
+        <h2 id={`${plannerId}-journey`} className="sc-visually-hidden">
+          {t('yourJourney')}
+        </h2>
+        <div className="sc-place-rows">
+          {renderPlaceRow('origin')}
+          {renderPlaceRow('destination')}
+          {!searchField && (
+            <button className="sc-swap" aria-label={t('swap')} onClick={swapPlaces}>
+              <ArrowDownUp size={16} />
+            </button>
+          )}
+        </div>
+        {searchField ? (
+          renderSearchActions(searchField)
+        ) : (
+          <>
+            {drivingStops.length > 0 && routePanel !== 'stops' && (
+              <button className="sc-text-button" onClick={() => setRoutePanel('stops')}>
+                <MapPin size={15} />
+                {t('mobileStopCount', { count: drivingStops.length })}
+              </button>
+            )}
+            {routePanel === 'stops' && renderStopovers()}
+            {stopoverRoutingBlocked && routePanel !== 'stops' && (
+              <div className="sc-status-actions" role="alert">
+                <p className="sc-error">{t('transitStopoverUnsupported')}</p>
+                <button className="sc-small-button" onClick={() => runStatusAction('removeStops')}>
+                  {t('removeStopsContinue')}
+                </button>
+                <button className="sc-small-button" onClick={() => switchLiveMode('drive')}>
+                  {t('switchToDrive')}
+                </button>
+              </div>
+            )}
+            {routePanel === 'more' && (
+              <div className="sc-route-more">
+                <div className="sc-route-more-actions">
+                  <button className="sc-small-button" onClick={() => savePlace(state.origin)}>
+                    <Bookmark size={15} />
+                    {t('saveOrigin')}
+                  </button>
+                  <button className="sc-small-button" onClick={() => savePlace(state.destination)}>
+                    <Bookmark size={15} />
+                    {t('saveDestination')}
+                  </button>
+                </div>
+                {renderSavedPlaces()}
+                {renderDestinationHours()}
+                <p className="sc-help">
+                  {t(googleMode ? 'liveAddressHint' : 'manualLocationNote')}
+                </p>
+              </div>
+            )}
+            {locationError && (
+              <p role="alert" className="sc-error">
+                {t('locationFailed')}
+              </p>
+            )}
+            {googleMode && googleError && (
+              <p className="sc-error" role="alert">
+                {googleError}
+              </p>
+            )}
+          </>
+        )}
+      </div>
+      {!searchField && <div className="sc-route-map-gap" aria-hidden="true" />}
+      {schedulePanelOpen && !searchField && renderSchedulePanel()}
+    </>
+  );
+
   const renderPageContent = (page: MobilePage) => {
     switch (page) {
       case 'route':
-        return (
-          <div className="sc-input-panel" aria-labelledby={`${plannerId}-journey`}>
-            {renderLocationSection()}
-            {renderScheduleSection()}
-            {googleMode && (
-              <section className="sc-input-section">
-                <h3 className="sc-section-label">{t('chooseMode')}</h3>
-                {renderModeSwitch()}
-                {renderRoutingActions(false)}
-              </section>
-            )}
-          </div>
-        );
+        return renderRoutePage();
       case 'costs':
         return (
           <div className="sc-input-panel">
@@ -4281,6 +4969,18 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
                 </>
               )}
               <div className="sc-mode-editor">{renderCostEditors()}</div>
+              {googleMode && editingMode === 'transit' && (
+                <div className="sc-at-fare-link">
+                  <a
+                    href="https://at.govt.nz/bus-train-ferry/journey-planner"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t('verifyATFare')}
+                  </a>
+                  <p className="sc-help">{t('atFareLinkHelp')}</p>
+                </div>
+              )}
             </section>
             <p className="sc-help sc-return-note">
               {t('mobileCostsLive')} {!googleMode && t('estimatedReturn')}
@@ -4306,6 +5006,21 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <>
             {renderSettings()}
             <section className="sc-page-content">
+              {googleMode && (
+                <div className="sc-surface">
+                  <h2>{t('manualEstimateSetting')}</h2>
+                  <p className="sc-help">{t('manualEstimateHelp')}</p>
+                  <button
+                    className="sc-small-button"
+                    onClick={() => {
+                      setManualRequested(true);
+                      goBack();
+                    }}
+                  >
+                    {t('useManualInputs')}
+                  </button>
+                </div>
+              )}
               <button className="sc-small-button sc-full-width" onClick={() => openPage('about')}>
                 {t('about')}
                 <ChevronRight size={16} />
@@ -4326,16 +5041,31 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
 
   const renderPageFooter = (page: MobilePage) =>
     page === 'route' ? (
-      <footer className="sc-page-footer">
-        <button
-          className="sc-primary-button sc-full-width"
-          onClick={confirmRoute}
-          disabled={routeConfirmBlocked}
-        >
-          {googleMode && <Route size={16} />}
-          {t(googleMode ? 'planRoute' : 'mobileDone')}
-        </button>
-      </footer>
+      // Search and the time panel each have their own Done; the footer waits for them.
+      !searchField &&
+      !schedulePanelOpen && (
+        <footer className="sc-page-footer sc-route-footer">
+          <button
+            className="sc-small-button sc-trip-button"
+            aria-expanded={schedulePanelOpen}
+            onClick={() => (schedulePanelOpen ? goBack() : setSchedulePanelOpen(true))}
+          >
+            <Clock3 size={16} aria-hidden="true" />
+            <span>{tripSummary()}</span>
+            <ChevronDown size={16} aria-hidden="true" />
+          </button>
+          <button
+            className="sc-primary-button"
+            onClick={confirmRoute}
+            disabled={routeConfirmBlocked}
+          >
+            {googleMode && <Route size={16} />}
+            {t(
+              !googleMode ? 'mobileDone' : addressResolving > 0 ? 'addressResolving' : 'planRoute',
+            )}
+          </button>
+        </footer>
+      )
     ) : page === 'costs' ? (
       <footer className="sc-page-footer sc-cost-footer">
         {selected && (
@@ -4364,6 +5094,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
     const titleId = `${plannerId}-page-${page}`;
     // Reading pages carry their own heading; the bar title then only names the page.
     const Title = page === 'route' || page === 'costs' ? 'h1' : 'p';
+    const searching = page === 'route' && searchField;
     return (
       <section
         key={page}
@@ -4374,11 +5105,14 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
         tabIndex={-1}
         inert={covered}
         data-page={page}
+        data-searching={searching || undefined}
       >
         <header className="sc-page-bar">
           <button
             className="sc-icon-button"
-            aria-label={t(page === 'route' ? 'mobileDiscardRoute' : 'mobileBack')}
+            aria-label={t(
+              searching ? 'mobileBack' : page === 'route' ? 'mobileDiscardRoute' : 'mobileBack',
+            )}
             onClick={goBack}
           >
             <ArrowLeft size={20} />
@@ -4386,6 +5120,32 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
           <Title id={titleId} className="sc-page-bar-title">
             {t(pageTitles[page])}
           </Title>
+          {page === 'route' && searching && (
+            <button className="sc-text-button sc-page-bar-action" onClick={goBack}>
+              {t('mobileSearchDone')}
+            </button>
+          )}
+          {page === 'route' && !searching && (
+            <div className="sc-page-bar-actions">
+              {googleMode && drivingPreference && liveMode === 'drive' && (
+                <button
+                  className="sc-icon-button"
+                  aria-label={t('addStopover')}
+                  aria-expanded={routePanel === 'stops'}
+                  onClick={() => setRoutePanel(routePanel === 'stops' ? null : 'stops')}
+                >
+                  <Plus size={20} />
+                </button>
+              )}
+              <button
+                className="sc-text-button"
+                aria-expanded={routePanel === 'more'}
+                onClick={() => setRoutePanel(routePanel === 'more' ? null : 'more')}
+              >
+                {t('mobileMore')}
+              </button>
+            </div>
+          )}
         </header>
         <div className="sc-page-body">{renderPageContent(page)}</div>
         {renderPageFooter(page)}
@@ -4396,12 +5156,11 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
   const renderMobileShell = () => {
     const pageShown = pages.length > 0 && !pickingActive;
     return (
-      <main className="sc-mobile-shell">
+      <main className="sc-mobile-shell" data-route-editing={routeEditing || undefined}>
         <div className="sc-mobile-main" inert={pageShown} aria-hidden={pageShown || undefined}>
           <div className="sc-mobile-map">
             {renderSchematic(true)}
-            {pickingActive ? renderPickBar() : renderRouteCard()}
-            {!pickingActive && renderMapTools()}
+            {pickingActive ? renderPickBar() : renderMapTop()}
             {weatherOpen && !pickingActive && (
               <div className="sc-mobile-weather">
                 <WeatherBar
@@ -4412,7 +5171,7 @@ export function SmartCommutePlanner(props: SmartCommutePlannerProps) {
               </div>
             )}
           </div>
-          {renderSheet()}
+          {!routeEditing && renderSheet()}
         </div>
         {pages.length > 0 && (
           <div className="sc-page-stack" ref={pageStackRef}>

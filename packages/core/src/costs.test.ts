@@ -5,6 +5,7 @@ import {
   compareOptions,
   createExampleOptions,
   DEFAULT_SETTINGS,
+  estimateReturnLegs,
   type CommuteSettings,
   type JourneyOption,
   type TransitFareRange,
@@ -602,5 +603,104 @@ describe('demonstration data', () => {
     first[0]!.outbound[0]!.distanceKm = 100;
     expect(second[0]!.outbound[0]!.distanceKm).toBe(19);
     expect(compareOptions(second, settings).results).toHaveLength(3);
+  });
+});
+
+describe('budget return estimated from the outbound route', () => {
+  const settings: CommuteSettings = { ...DEFAULT_SETTINGS, roundTrip: true };
+  const range: TransitFareRange = { min: 3, max: 7.9, source: 'at-estimate' };
+
+  it('mirrors driving distance and tolls without the outbound traffic delay', () => {
+    const outbound = [
+      {
+        mode: 'drive' as const,
+        distanceKm: 20,
+        durationMinutes: 30,
+        toll: 2.6,
+        congestionMinutes: 12,
+        source: 'google' as const,
+        estimated: true,
+      },
+    ];
+    const inbound = estimateReturnLegs(outbound);
+    expect(inbound).toEqual([
+      {
+        mode: 'drive',
+        distanceKm: 20,
+        durationMinutes: 30,
+        toll: 2.6,
+        source: 'google',
+        estimated: true,
+      },
+    ]);
+    const result = calculateOption(
+      {
+        id: 'drive',
+        name: 'Drive',
+        mode: 'drive',
+        outbound,
+        inbound,
+        parkingCost: 10,
+        waypoints: [],
+        returnBasis: 'estimated-from-outbound',
+      },
+      settings,
+    );
+    // Parking is charged once for the commute, not once per direction.
+    expect(result.parkingCost).toBe(10);
+    expect(result.tollCost).toBeCloseTo(5.2);
+    expect(result.warnings).not.toContain('missing-return');
+  });
+
+  it('keeps a fare range for the return but leaves an exact fare pending, never free', () => {
+    const transitLeg = (fare: Partial<{ fare: number; fareRange: TransitFareRange }>) => ({
+      mode: 'bus' as const,
+      durationMinutes: 20,
+      distanceKm: 8,
+      source: 'google' as const,
+      estimated: true,
+      transit: { departureStop: 'A', arrivalStop: 'B' },
+      ...fare,
+    });
+    const ranged = estimateReturnLegs([transitLeg({ fareRange: range }), transitLeg({ fare: 0 })]);
+    expect(ranged[0]).toMatchObject({ fareRange: { min: 3, max: 7.9 }, fareSource: 'at-estimate' });
+    expect(ranged[1]).toMatchObject({ fare: 0 });
+    expect(ranged[0]!.transit).toEqual({ departureStop: 'B', arrivalStop: 'A' });
+
+    const exact = estimateReturnLegs([transitLeg({ fare: 4.9 })]);
+    expect(exact[0]).toMatchObject({ farePending: true });
+    expect(exact[0]!.fare).toBeUndefined();
+    const result = calculateOption(
+      {
+        id: 'transit',
+        name: 'Transit',
+        mode: 'transit',
+        outbound: [transitLeg({ fare: 4.9 })],
+        inbound: exact,
+        parkingCost: 0,
+        waypoints: [],
+        returnBasis: 'estimated-from-outbound',
+      },
+      settings,
+    );
+    expect(result.warnings).toContain('fare-pending');
+    expect(result.fareCost).toBeCloseTo(4.9);
+    // A confirmed return fare clears the pending state.
+    const confirmed = calculateOption(
+      { ...result.option, inbound: [{ ...exact[0]!, fare: 5.4 }] },
+      settings,
+    );
+    expect(confirmed.warnings).not.toContain('fare-pending');
+    expect(confirmed.fareCost).toBeCloseTo(10.3);
+  });
+
+  it('rejects an unknown return basis', () => {
+    const [option] = createExampleOptions();
+    expect(() =>
+      calculateOption(
+        { ...option!, returnBasis: 'guessed' as JourneyOption['returnBasis'] },
+        settings,
+      ),
+    ).toThrow(/returnBasis/);
   });
 });

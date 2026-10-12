@@ -80,6 +80,9 @@ function validateLeg(leg: TravelLeg, field: string): void {
   if (typeof leg.estimated !== 'boolean') {
     throw new TypeError(`${field}.estimated must be a boolean.`);
   }
+  if (leg.farePending !== undefined && typeof leg.farePending !== 'boolean') {
+    throw new TypeError(`${field}.farePending must be a boolean.`);
+  }
   nonNegative(leg.durationMinutes, `${field}.durationMinutes`);
   for (const key of [
     'distanceKm',
@@ -155,6 +158,13 @@ function validateOption(option: JourneyOption): void {
   if (option.parkingVerified !== undefined && typeof option.parkingVerified !== 'boolean') {
     throw new TypeError('option.parkingVerified must be a boolean.');
   }
+  if (
+    option.returnBasis !== undefined &&
+    option.returnBasis !== 'routed' &&
+    option.returnBasis !== 'estimated-from-outbound'
+  ) {
+    throw new TypeError('option.returnBasis is not supported.');
+  }
   for (const direction of ['outbound', 'inbound'] as const) {
     if (!Array.isArray(option[direction])) {
       throw new TypeError(`option.${direction} must be an array of travel legs.`);
@@ -206,7 +216,8 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
       leg.source === 'google' &&
       (leg.mode === 'bus' || leg.mode === 'train') &&
       leg.fare === undefined &&
-      leg.fareRange === undefined
+      leg.fareRange === undefined &&
+      !leg.farePending
     ) {
       throw new TypeError(
         'Google transit legs require a fare or fare range; missing fare is not free travel.',
@@ -307,6 +318,12 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
     warnings.push('unverified-parking');
   }
   if (settings.roundTrip && option.inbound.length === 0) warnings.push('missing-return');
+  if (
+    includedLegs.some(
+      (leg) => leg.farePending && leg.fare === undefined && leg.fareRange === undefined,
+    )
+  )
+    warnings.push('fare-pending');
   const result: RouteResult = {
     id: option.id,
     name: option.name,
@@ -427,4 +444,48 @@ export function compareOptions(
       Number(right.distanceComplete) - Number(left.distanceComplete) || byDistance(left, right),
   )[0]!;
   return { results, cheapest, fastest, fewestTransfers, bestValue, shortest };
+}
+
+/**
+ * A budget reference for the way back when no return time was chosen: the outbound legs in
+ * reverse. Driving keeps distance, consumption and tolls but not the outbound traffic delay.
+ * A transit fare range is kept as a range; an exact outbound fare is not assumed to apply to
+ * the return, so the return fare stays pending until someone confirms it.
+ */
+export function estimateReturnLegs(outbound: TravelLeg[]): TravelLeg[] {
+  const transit = (leg: TravelLeg) => leg.mode === 'bus' || leg.mode === 'train';
+  const fareRange = outbound.find(transit)?.fareRange;
+  const priced = outbound.find(transit);
+  const rangeOnly = priced !== undefined && priced.fare === undefined && fareRange !== undefined;
+  let boarded = false;
+  return [...outbound].reverse().map((leg) => {
+    const estimate: TravelLeg = {
+      mode: leg.mode,
+      durationMinutes: leg.durationMinutes,
+      source: leg.source,
+      estimated: true,
+    };
+    if (leg.distanceKm !== undefined) estimate.distanceKm = leg.distanceKm;
+    if (leg.fuelConsumption !== undefined) estimate.fuelConsumption = leg.fuelConsumption;
+    if (leg.toll !== undefined) estimate.toll = leg.toll;
+    if (leg.transfers !== undefined) estimate.transfers = leg.transfers;
+    if (leg.transit)
+      estimate.transit = {
+        ...leg.transit,
+        departureStop: leg.transit.arrivalStop,
+        arrivalStop: leg.transit.departureStop,
+      };
+    if (transit(leg)) {
+      // One fare covers the whole direction, so later boardings carry an explicit zero.
+      if (boarded) {
+        estimate.fare = 0;
+        if (rangeOnly) estimate.fareSource = 'at-estimate';
+      } else if (rangeOnly) {
+        estimate.fareRange = { ...fareRange, assumptions: [...(fareRange.assumptions ?? [])] };
+        estimate.fareSource = 'at-estimate';
+      } else estimate.farePending = true;
+      boarded = true;
+    }
+    return estimate;
+  });
 }

@@ -2534,8 +2534,9 @@ label.sc-route-measurements {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: calc(env(safe-area-inset-top) + 92px) 72px var(--sc-space-6) var(--sc-gutter);
+  padding: calc(env(safe-area-inset-top) + 140px) var(--sc-gutter) var(--sc-space-6);
 }
+/* Two rows over the map: the route summary alone, then the map tools side by side. */
 .sc-mobile-top {
   position: absolute;
   top: calc(env(safe-area-inset-top) + var(--sc-space-3));
@@ -2543,23 +2544,32 @@ label.sc-route-measurements {
   left: var(--sc-space-3);
   z-index: 3;
   display: flex;
+  flex-direction: column;
   align-items: stretch;
   gap: var(--sc-space-2);
 }
 .sc-route-card {
-  display: grid;
-  flex: 1;
-  align-content: center;
-  gap: 2px;
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-2);
   min-width: 0;
   min-height: 56px;
-  padding: var(--sc-space-2) var(--sc-space-4);
+  padding: var(--sc-space-2) var(--sc-space-3) var(--sc-space-2) var(--sc-space-4);
   border: 1px solid var(--sc-line);
   border-radius: 12px;
   background: var(--sc-surface);
   box-shadow: var(--sc-float-shadow);
   color: var(--sc-text);
   text-align: left;
+}
+.sc-route-card > svg {
+  color: var(--sc-muted);
+}
+.sc-route-card-text {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
 }
 .sc-route-card-places {
   display: flex;
@@ -2576,15 +2586,17 @@ label.sc-route-measurements {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The start gives way first; the destination keeps as much of its name as fits. */
 .sc-route-card-places > span {
   flex: 0 1 auto;
-  max-width: 45%;
+  max-width: 40%;
   color: var(--sc-text-2);
 }
 .sc-route-card-places > svg {
   color: var(--sc-muted);
 }
 .sc-route-card-places > strong {
+  flex: 0 1 auto;
   font-weight: 650;
 }
 .sc-route-card-meta {
@@ -2602,38 +2614,49 @@ label.sc-route-measurements {
   font-size: var(--sc-fs-input);
   font-weight: 600;
 }
-.sc-map-button {
-  display: grid;
-  flex: none;
-  place-items: center;
-  width: 48px;
-  height: 48px;
+.sc-map-tools {
+  display: flex;
+  gap: var(--sc-space-2);
+}
+.sc-map-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 var(--sc-space-3);
   border: 1px solid var(--sc-line);
   border-radius: 12px;
   background: var(--sc-surface);
   box-shadow: var(--sc-float-shadow);
   color: var(--sc-text);
+  font-size: var(--sc-fs-label);
+  font-weight: 550;
+  white-space: nowrap;
 }
-.sc-mobile-top > .sc-map-button {
-  height: auto;
-  min-height: 56px;
-}
-.sc-map-button[aria-expanded='true'] {
+.sc-map-tool[aria-expanded='true'] {
   border-color: var(--sc-accent);
   color: var(--sc-accent-text);
 }
-.sc-map-fabs {
-  position: absolute;
-  top: calc(env(safe-area-inset-top) + 80px);
-  right: var(--sc-space-3);
-  z-index: 2;
-  display: grid;
-  gap: var(--sc-space-2);
+/* Narrow phones keep the icons; the names stay for screen readers. */
+@media (max-width: 399px) {
+  .sc-map-tool {
+    padding: 0;
+  }
+  .sc-map-tool > span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
 }
 .sc-mobile-weather {
   position: absolute;
-  top: calc(env(safe-area-inset-top) + 80px);
-  right: calc(var(--sc-space-3) + 56px);
+  top: calc(env(safe-area-inset-top) + 132px);
+  right: var(--sc-space-3);
   left: var(--sc-space-3);
   z-index: 2;
   overflow: hidden;
@@ -2645,6 +2668,7 @@ label.sc-route-measurements {
   border-bottom: 0;
 }
 .sc-mobile-pick {
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
   padding: var(--sc-space-2) var(--sc-space-2) var(--sc-space-2) var(--sc-space-4);
@@ -2893,7 +2917,6 @@ label.sc-route-measurements {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.sc-page[data-page='route'] .sc-page-body,
 .sc-page[data-page='costs'] .sc-page-body {
   padding: var(--sc-space-5) var(--sc-gutter) var(--sc-space-8);
   background: var(--sc-surface);
@@ -2931,18 +2954,301 @@ label.sc-route-measurements {
   top: calc(env(safe-area-inset-top) + 80px);
   bottom: auto;
 }
-/* Short or sideways screens: the map tools join the top row so none sit under the sheet. */
+/* Short or sideways screens: summary and tools share one row to leave the map its height. */
 @media (max-height: 600px) {
   .sc-mobile-top:not(.sc-mobile-pick) {
-    right: calc(var(--sc-space-3) + 168px);
+    flex-direction: row;
   }
-  .sc-map-fabs {
-    top: calc(env(safe-area-inset-top) + var(--sc-space-3) + 4px);
-    grid-auto-flow: column;
+  .sc-mobile-top .sc-route-card {
+    flex: 1;
   }
   .sc-mobile-weather {
-    right: var(--sc-space-3);
+    top: calc(env(safe-area-inset-top) + 80px);
   }
+  .sc-mobile .sc-schematic {
+    padding-top: calc(env(safe-area-inset-top) + 84px);
+  }
+}
+/* Drive and public transport stay in the sheet header in every state. */
+.sc-mode-bar {
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sc-space-2);
+  padding: 0 var(--sc-gutter) var(--sc-space-3);
+}
+.sc-sheet-grip + .sc-mode-bar {
+  padding-top: 0;
+}
+.sc-mode-bar:first-child {
+  padding-top: var(--sc-space-3);
+}
+.sc-mode-bar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sc-space-2);
+  min-height: 44px;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: var(--sc-radius-sm);
+  background: var(--sc-surface);
+  color: var(--sc-text);
+  font-weight: 600;
+}
+.sc-mode-bar button[aria-pressed='true'] {
+  border-color: var(--sc-accent);
+  background: var(--sc-accent);
+  color: var(--sc-on-accent);
+}
+.sc-sheet-status-view h3,
+.sc-empty-state .sc-status-actions + p {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-2);
+  font-size: var(--sc-fs-title);
+  font-weight: 650;
+  line-height: 1.35;
+}
+.sc-sheet-status-view[role='alert'] h3 {
+  color: var(--sc-danger);
+  font-size: var(--sc-fs-body);
+}
+.sc-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sc-space-2);
+  margin-top: var(--sc-space-3);
+}
+.sc-status-actions .sc-primary-button,
+.sc-status-actions .sc-small-button {
+  min-height: 44px;
+}
+.sc-empty-state h3 .sc-spinner,
+.sc-sheet-status-view h3 .sc-spinner {
+  flex: none;
+}
+
+/* Route page: compact places over the map; searching a place takes the whole page. */
+.sc-page[data-page='route'] {
+  background: transparent;
+}
+.sc-page[data-page='route'] .sc-page-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sc-page[data-page='route'][data-searching] {
+  background: var(--sc-surface);
+}
+.sc-page[data-page='route'][data-searching] .sc-page-body {
+  overflow-y: auto;
+}
+.sc-page-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-1);
+  margin-left: auto;
+}
+.sc-page-bar-action {
+  margin-left: auto;
+  padding: 0 var(--sc-space-2);
+}
+.sc-route-panel {
+  display: grid;
+  flex: none;
+  gap: var(--sc-space-3);
+  padding: var(--sc-space-3) var(--sc-space-3) var(--sc-space-4) var(--sc-space-4);
+  border-bottom: 1px solid var(--sc-line);
+  background: var(--sc-surface);
+  box-shadow: var(--sc-float-shadow);
+  max-height: 70%;
+  overflow-y: auto;
+}
+.sc-route-panel[data-searching] {
+  max-height: none;
+  border-bottom: 0;
+  box-shadow: none;
+}
+.sc-place-rows {
+  position: relative;
+  display: grid;
+  gap: var(--sc-space-2);
+  padding-right: 52px;
+}
+.sc-route-panel[data-searching] .sc-place-rows {
+  padding-right: 0;
+}
+/* iOS zooms the page when a field under 16px takes focus, which would shift the whole layout. */
+.sc-mobile :is(input, select, textarea) {
+  font-size: max(16px, 1em);
+}
+.sc-place-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-3);
+  min-width: 0;
+}
+.sc-place-row[hidden] {
+  display: none;
+}
+.sc-place-row > .sc-route-dot {
+  position: static;
+  flex: none;
+}
+.sc-place-input {
+  flex: 1;
+  min-width: 0;
+}
+input.sc-place-input {
+  height: 48px;
+}
+.sc-place-input.sc-live-address > div {
+  min-height: 48px;
+}
+.sc-place-row.sc-field-invalid input.sc-place-input,
+.sc-place-row.sc-field-invalid .sc-live-address > div {
+  border-color: var(--sc-danger);
+}
+.sc-place-rows > .sc-swap {
+  top: 50%;
+  right: 0;
+  left: auto;
+  width: 44px;
+  height: 44px;
+}
+.sc-search-actions {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sc-search-actions li + li {
+  border-top: 1px solid var(--sc-line);
+}
+.sc-search-actions button {
+  display: flex;
+  align-items: center;
+  gap: var(--sc-space-3);
+  width: 100%;
+  min-height: 52px;
+  color: var(--sc-text);
+  text-align: left;
+}
+.sc-search-actions button > svg {
+  color: var(--sc-accent-text);
+}
+.sc-search-actions small {
+  display: block;
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+}
+.sc-route-panel .sc-stopovers {
+  margin: 0;
+}
+.sc-route-more {
+  display: grid;
+  gap: var(--sc-space-3);
+}
+.sc-route-more-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sc-space-2);
+}
+.sc-route-more .sc-saved-places {
+  margin-top: 0;
+}
+.sc-route-map-gap {
+  flex: 1;
+  min-height: 0;
+  pointer-events: none;
+}
+.sc-route-footer .sc-trip-button {
+  flex: 1;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 48px;
+}
+.sc-trip-button > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-trip-button > svg:last-child {
+  margin-left: auto;
+}
+.sc-route-footer .sc-primary-button {
+  flex: none;
+}
+.sc-schedule-panel {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  display: grid;
+  gap: var(--sc-space-4);
+  max-height: 85%;
+  padding: var(--sc-space-5) var(--sc-gutter);
+  overflow-y: auto;
+  border-top: 1px solid var(--sc-line);
+  border-radius: 16px 16px 0 0;
+  background: var(--sc-surface);
+  box-shadow: var(--sc-shadow-raised);
+}
+.sc-schedule-panel h2 {
+  font-size: var(--sc-fs-title);
+  font-weight: 650;
+}
+.sc-segmented,
+.sc-fold-choice {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.sc-segmented legend,
+.sc-fold-choice legend {
+  margin-bottom: var(--sc-space-2);
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
+  font-weight: 550;
+}
+.sc-segmented > div {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  border: 1px solid var(--sc-line-strong);
+  border-radius: var(--sc-radius-sm);
+  overflow: hidden;
+}
+.sc-segmented button {
+  min-height: 44px;
+  padding: 0 var(--sc-space-2);
+  color: var(--sc-text);
+  font-weight: 550;
+}
+.sc-segmented button + button {
+  border-left: 1px solid var(--sc-line-strong);
+}
+.sc-segmented button[aria-pressed='true'] {
+  background: var(--sc-accent);
+  color: var(--sc-on-accent);
+}
+.sc-times-review {
+  display: grid;
+  gap: var(--sc-space-2);
+  justify-items: start;
+  padding: var(--sc-space-3);
+  border: 1px solid var(--sc-warn-line);
+  border-radius: var(--sc-radius-sm);
+  background: var(--sc-warn-bg);
+  color: var(--sc-warn-text);
+  font-size: var(--sc-fs-label);
+}
+.sc-return-policy small {
+  display: block;
 }
 .sc-selected-bar-text,
 .sc-cost-footer-total {

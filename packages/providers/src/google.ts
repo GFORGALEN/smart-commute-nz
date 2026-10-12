@@ -76,6 +76,8 @@ export interface GoogleAutocompleteOptions {
   initialValue?: string;
   onInput?: (value: string) => void;
   label?: string;
+  /** True while a chosen suggestion is being resolved to coordinates, false once settled. */
+  onResolving?: (resolving: boolean) => void;
 }
 
 /** How every alternative route is drawn; the selected one is emphasised and drawn on top. */
@@ -480,7 +482,13 @@ export class GoogleRouteProvider implements RouteProvider {
   private routeChips: google.maps.OverlayView[] = [];
   private routeListeners: google.maps.MapsEventListener[] = [];
   private fittedRouteSet = '';
+  /**
+   * Routes of recent responses, so a planner can redraw a cached result for another travel
+   * mode. A route is only ever drawn with the other alternatives of its own response.
+   */
   private sdkRoutes = new Map<string, GoogleRouteData>();
+  private routeResponse = new Map<string, string>();
+  private responseOrder: string[] = [];
   private placeHours = new Map<string, Promise<PlaceHours>>();
   private computationWarnings: string[] = [];
   private metrics: ProviderMetrics = {
@@ -634,6 +642,7 @@ export class GoogleRouteProvider implements RouteProvider {
     };
     const listener = (event: Event) => {
       const selectedRevision = ++revision;
+      options.onResolving?.(true);
       void (async () => {
         try {
           const { placePrediction } = event as google.maps.places.PlacePredictionSelectEvent;
@@ -657,6 +666,8 @@ export class GoogleRouteProvider implements RouteProvider {
           }
         } catch (error) {
           if (active && selectedRevision === revision) onError?.(readableError(error));
+        } finally {
+          if (active) options.onResolving?.(false);
         }
       })();
     };
@@ -846,10 +857,12 @@ export class GoogleRouteProvider implements RouteProvider {
   renderRoute(id: string, options: RouteRenderOptions = {}): void {
     this.clearMapRoutes();
     const map = this.map;
-    if (!map || !this.sdkRoutes.has(id)) return;
-    const ordered = [...this.sdkRoutes.entries()].sort(([left], [right]) =>
-      left === id ? 1 : right === id ? -1 : 0,
+    const response = this.routeResponse.get(id);
+    if (!map || !this.sdkRoutes.has(id) || response === undefined) return;
+    const group = [...this.sdkRoutes.entries()].filter(
+      ([routeId]) => this.routeResponse.get(routeId) === response,
     );
+    const ordered = group.sort(([left], [right]) => (left === id ? 1 : right === id ? -1 : 0));
     const drawn = ordered.map(([routeId, route]) => {
       const selected = routeId === id;
       const style = selected ? ROUTE_STYLE.selected : ROUTE_STYLE.alternative;
@@ -909,10 +922,13 @@ export class GoogleRouteProvider implements RouteProvider {
         ),
       );
     }
-    const routeSet = [...this.sdkRoutes.keys()].join('|');
-    if (routeSet !== this.fittedRouteSet) {
-      this.fittedRouteSet = routeSet;
-      this.fitRoutes(map, options.padding);
+    if (response !== this.fittedRouteSet) {
+      this.fittedRouteSet = response;
+      this.fitRoutes(
+        map,
+        group.map(([, route]) => route),
+        options.padding,
+      );
     }
   }
 
@@ -1022,11 +1038,15 @@ export class GoogleRouteProvider implements RouteProvider {
     return marker;
   }
 
-  private fitRoutes(map: google.maps.Map, padding?: google.maps.Padding): void {
-    const bounds = [...this.sdkRoutes.values()]
+  private fitRoutes(
+    map: google.maps.Map,
+    routes: GoogleRouteData[],
+    padding?: google.maps.Padding,
+  ): void {
+    const bounds = routes
       .map((route) => route.viewport?.toJSON?.())
       .filter((viewport): viewport is google.maps.LatLngBoundsLiteral => Boolean(viewport));
-    const first = [...this.sdkRoutes.values()].find((route) => route.viewport)?.viewport;
+    const first = routes.find((route) => route.viewport)?.viewport;
     if (!first) return;
     const union = bounds.length
       ? bounds.reduce((all, viewport) => ({
@@ -1052,6 +1072,8 @@ export class GoogleRouteProvider implements RouteProvider {
     this.mapLifecycleCleanup = undefined;
     this.clearMapRoutes();
     this.sdkRoutes.clear();
+    this.routeResponse.clear();
+    this.responseOrder = [];
     this.map = undefined;
     this.overlayViewConstructor = undefined;
   }
@@ -1272,24 +1294,43 @@ export class GoogleRouteProvider implements RouteProvider {
       }
       const outbound = await this.compute(base);
       let inbound: GoogleRouteData[] = [];
+      let returnStatus: RouteResult['returnStatus'];
       if (request.roundTrip) {
-        inbound = await this.compute({
-          ...base,
-          origin: destination,
-          destination: origin,
-          intermediates: base.intermediates ? [...base.intermediates].reverse() : undefined,
-          departureTime: timeAware ? request.returnTime : undefined,
-        });
-        warnings.push(
-          'Outbound alternatives are paired with the primary independently requested return route. Return alternatives are not exhaustively combined.',
-        );
+        try {
+          inbound = await this.compute({
+            ...base,
+            origin: destination,
+            destination: origin,
+            intermediates: base.intermediates ? [...base.intermediates].reverse() : undefined,
+            departureTime: timeAware ? request.returnTime : undefined,
+          });
+          returnStatus = 'routed';
+          warnings.push(
+            'Outbound alternatives are paired with the primary independently requested return route. Return alternatives are not exhaustively combined.',
+          );
+        } catch (error) {
+          // A found outbound route stays useful when no return exists at the chosen time.
+          const readable = readableError(error);
+          if (readable.code !== 'NO_ROUTES') throw readable;
+          returnStatus = 'no-routes';
+          this.metrics.routeErrors += 1;
+          this.metrics.lastError = readable.code;
+        }
       }
-      this.sdkRoutes.clear();
-      this.clearMapRoutes();
       warnings.push(...this.computationWarnings);
+      // Responses are kept by request; the map is left as it is until a route is drawn.
+      const response = `response-${this.metrics.routeRequests}`;
+      this.responseOrder.push(response);
+      for (const stale of this.responseOrder.splice(0, Math.max(0, this.responseOrder.length - 8)))
+        for (const [routeId, owner] of this.routeResponse)
+          if (owner === stale) {
+            this.routeResponse.delete(routeId);
+            this.sdkRoutes.delete(routeId);
+          }
       const routes = outbound.map((route, index): JourneyOption => {
         const id = `google-${request.mode}-${this.metrics.routeRequests}-${index}`;
         this.sdkRoutes.set(id, route);
+        this.routeResponse.set(id, response);
         warnings.push(...(route.warnings ?? []));
         const inboundRoute = inbound[0];
         if (inboundRoute) warnings.push(...(inboundRoute.warnings ?? []));
@@ -1306,6 +1347,7 @@ export class GoogleRouteProvider implements RouteProvider {
           parkingCost: 0,
           parkingVerified: false,
           waypoints,
+          ...(inboundRoute ? { returnBasis: 'routed' as const } : {}),
         };
       });
       const agencies = [...outbound, ...inbound].flatMap(
@@ -1338,11 +1380,10 @@ export class GoogleRouteProvider implements RouteProvider {
         attribution: ['Google Maps', ...agencyNames].join(' · '),
         attributionLinks,
         requestCount: this.metrics.routeRequests,
+        ...(returnStatus ? { returnStatus } : {}),
       };
     } catch (error) {
       const readable = readableError(error);
-      this.sdkRoutes.clear();
-      this.clearMapRoutes();
       this.metrics.routeErrors += 1;
       this.metrics.lastError = readable.code;
       throw readable;

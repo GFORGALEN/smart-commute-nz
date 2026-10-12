@@ -39,6 +39,8 @@ export interface RouteResult {
   attribution: string;
   attributionLinks?: { label: string; url: string }[];
   requestCount: number;
+  /** For a round trip: whether a return route was found for the chosen return time. */
+  returnStatus?: 'routed' | 'no-routes';
 }
 
 export interface ProviderMetrics {

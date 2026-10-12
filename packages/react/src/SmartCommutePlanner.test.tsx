@@ -4,8 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmartCommutePlanner, type SmartCommutePlannerProps } from './SmartCommutePlanner';
 import { RouteProviderError } from '@smart-commute/providers';
 import {
+  AUCKLAND_TIME_ZONE,
   createExampleOptions,
   DEFAULT_SETTINGS,
+  formatZonedTime,
   type Location,
   type RouteResult,
 } from '@smart-commute/core';
@@ -81,6 +83,7 @@ function liveResponse(id = 'google-drive-test', roundTrip = false) {
     attribution: 'Google Maps',
     attributionLinks: [{ label: 'Transit agency', url: 'https://at.govt.nz/' }],
     requestCount: 1,
+    ...(roundTrip ? { returnStatus: 'routed' as const } : {}),
   };
 }
 function rangedTransitResponse(roundTrip = false) {
@@ -124,6 +127,7 @@ function rangedTransitResponse(roundTrip = false) {
     attribution: 'Google Maps',
     attributionLinks: [{ label: 'Auckland Transport', url: 'https://at.govt.nz/' }],
     requestCount: 1,
+    ...(roundTrip ? { returnStatus: 'routed' as const } : {}),
   };
 }
 const expectMoneyRange = (element: HTMLElement, min: number, max: number) => {
@@ -140,6 +144,15 @@ async function renderGooglePlanner(extraProps: Partial<SmartCommutePlannerProps>
   await waitFor(() => expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled());
   return result;
 }
+/** A routed return needs an explicit return time; without one the return is a budget estimate. */
+const chooseReturnTime = (hoursAhead = 8) => {
+  fireEvent.change(screen.getByLabelText('Return journey', { exact: true }), {
+    target: { value: 'scheduled' },
+  });
+  fireEvent.change(screen.getByLabelText('Return time', { exact: true }), {
+    target: { value: localDateTime(new Date(Date.now() + hoursAhead * 3600_000).toISOString()) },
+  });
+};
 const useOneWay = () =>
   fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
 const planRoute = () => fireEvent.click(screen.getByRole('button', { name: 'Plan route' }));
@@ -151,6 +164,7 @@ async function planRangedTransit(
   const rendered = await renderGooglePlanner(extraProps);
   if (!roundTrip)
     fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
+  else chooseReturnTime();
   fireEvent.click(screen.getByRole('button', { name: 'Public transport' }));
   await screen.findByTestId('cost-google-transit-range');
   return rendered;
@@ -168,7 +182,9 @@ async function addGoogleStop(location: Location) {
 const goTo = (name: string) => fireEvent.click(screen.getByRole('tab', { name }));
 const changeNumber = (label: string, value: string) =>
   fireEvent.change(screen.getByLabelText(label, { exact: true }), { target: { value } });
-const localDateTime = (iso: string) => {
+// Date and time fields take Auckland wall-clock time, whatever the browser's own zone.
+const localDateTime = (iso: string) => formatZonedTime(new Date(iso).getTime(), AUCKLAND_TIME_ZONE);
+const browserLocal = (iso: string) => {
   const date = new Date(iso);
   const two = (value: number) => String(value).padStart(2, '0');
   return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}T${two(date.getHours())}:${two(date.getMinutes())}`;
@@ -653,11 +669,17 @@ describe('optional Google provider safeguards', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Save starting point' }));
     expect(localStorage.getItem('smart-commute-nz:v1')).not.toContain('Google supplied address');
-    expect(screen.getByRole('status')).toHaveTextContent('session-only');
+    expect(
+      screen
+        .getAllByRole('status')
+        .map((element) => element.textContent)
+        .join(' '),
+    ).toContain('session-only');
   });
 
-  it('replaces saved times that have already passed before a traffic-aware request', async () => {
-    const past = localDateTime(new Date(Date.now() - 60 * 60 * 1000).toISOString());
+  it('replaces saved times that have already passed and invents no return time', async () => {
+    // Storage before version 2 held browser-local times.
+    const past = browserLocal(new Date(Date.now() - 60 * 60 * 1000).toISOString());
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
@@ -672,8 +694,41 @@ describe('optional Google provider safeguards', () => {
     );
     await renderGooglePlanner();
     expect(screen.getByLabelText('Leave now', { exact: true })).toBeChecked();
-    const returnTime = screen.getByLabelText('Return time', { exact: true }) as HTMLInputElement;
-    expect(new Date(returnTime.value).getTime()).toBeGreaterThan(Date.now());
+    expect(screen.getByLabelText('Return journey', { exact: true })).toHaveValue('estimate');
+    expect(screen.queryByLabelText('Return time', { exact: true })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/saved before the planner used Auckland time/),
+    ).not.toBeInTheDocument();
+  });
+
+  it('asks before using future times saved in an unknown browser time zone', async () => {
+    const later = browserLocal(new Date(Date.now() + 26 * 60 * 60 * 1000).toISOString());
+    localStorage.setItem(
+      'smart-commute-nz:v1',
+      JSON.stringify({
+        origin: { label: '4 Fong Road, Auckland' },
+        destination: { label: defaultProps.destination },
+        settings: { ...DEFAULT_SETTINGS, roundTrip: false },
+        options: createExampleOptions(),
+        leaveNow: false,
+        departure: later,
+      }),
+    );
+    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    // The saved time is kept as written but not guessed to be an Auckland time.
+    expect(screen.getByLabelText('Departure time', { exact: true })).toHaveValue(later);
+    expect(screen.getByRole('button', { name: 'These are Auckland times' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Plan route' })).toBeDisabled();
+    // A saved trip is restored but not planned while its times are unconfirmed.
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'These are Auckland times' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled());
+    expect(JSON.parse(localStorage.getItem('smart-commute-nz:v1')!)).toMatchObject({
+      timesVersion: 2,
+      timeZone: 'Pacific/Auckland',
+      departure: later,
+    });
   });
 
   it('sends an explicit transit lookup with no driving waypoints', async () => {
@@ -1449,7 +1504,7 @@ describe('component host updates', () => {
     expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
   });
 
-  it('removes one-way live results when round-trip requirements change', async () => {
+  it('turns a one-way result into a labelled return budget, and drops it for a chosen return time', async () => {
     google.getRoutes.mockResolvedValueOnce({
       routes: [
         {
@@ -1479,7 +1534,16 @@ describe('component host updates', () => {
     planRoute();
     await waitFor(() => expect(screen.getByTestId('route-card-google-oneway')).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText('Include the return journey', { exact: true }));
-    expect(screen.queryByTestId('route-card-google-oneway')).not.toBeInTheDocument();
+    // The return is estimated from the outbound route without asking Google again.
+    expect(screen.getByTestId('route-card-google-oneway')).toBeInTheDocument();
+    expect(screen.getByText('return budget estimate · return not live')).toBeVisible();
+    // 9 km each way: fuel NZ$2.58 and upkeep NZ$0.72 per direction.
+    expect(screen.getByTestId('cost-google-oneway')).toHaveTextContent('6.61');
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    // A chosen return time needs a routed return, so the outbound-only result is not reused.
+    fireEvent.change(screen.getByLabelText('Return journey', { exact: true }), {
+      target: { value: 'scheduled' },
+    });
     expect(screen.queryAllByTestId(/^route-card-/)).toHaveLength(0);
   });
 });
@@ -1681,27 +1745,44 @@ describe('phone map-first layout', () => {
   });
   const routeCard = () => screen.getByRole('button', { name: /^Edit route:/ });
   const routePage = () => screen.getByRole('dialog', { name: 'Edit route' });
+  const sheet = () => screen.getByRole('region', { name: 'Cost options' });
   const noPageOpen = () =>
     waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  /** A provider answer the test releases when it chooses, to reproduce out-of-order replies. */
+  const deferred = <T,>() => {
+    let resolve: (value: T) => void = () => undefined;
+    let reject: (error: unknown) => void = () => undefined;
+    const promise = new Promise<T>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  };
+  const renderLivePhone = async () => {
+    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    await within(sheet()).findByText('Places are ready. Plan the route to compare costs.');
+  };
 
   beforeEach(() => {
     window.history.replaceState(null, '');
     vi.stubGlobal('matchMedia', phoneMedia);
   });
 
-  it('opens on the map with the selected cost and options instead of the input form', () => {
+  it('opens on the map with a two-row top and the selected cost below', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     expect(screen.queryByRole('tablist')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Starting point', { exact: true })).not.toBeInTheDocument();
     expect(routeCard()).toHaveTextContent('4 Fong Road');
     expect(routeCard()).toHaveTextContent('Britomart');
+    const tools = screen.getByRole('group', { name: 'Map tools' });
+    expect(
+      within(tools)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Settings', 'Locate', 'Weather']);
     expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.95');
     expect(screen.getByTestId('cost-transit')).toHaveTextContent('13.00');
-    expect(screen.getByRole('button', { name: 'Hide options' })).toHaveAttribute(
-      'aria-expanded',
-      'true',
-    );
-    expect(screen.getByText(/not a navigable map/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('route-card-transit'));
     expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.00');
@@ -1711,13 +1792,15 @@ describe('phone map-first layout', () => {
     expect(screen.getByTestId('selected-cost')).toBeVisible();
   });
 
-  it('discards an unconfirmed route edit on back and keeps a confirmed one', async () => {
+  it('keeps the route editor compact and discards unconfirmed edits on back', async () => {
     render(<SmartCommutePlanner {...defaultProps} />);
-    // A tap focuses the card; focus returns to it when the page closes.
     routeCard().focus();
     fireEvent.click(routeCard());
-    expect(window.history.state).toMatchObject({ smartCommuteLayer: 1 });
     expect(routePage()).toHaveFocus();
+    // No mode switch, stop counter or return checkbox crowds the editor.
+    expect(within(routePage()).queryByRole('button', { name: 'Public transport' })).toBeNull();
+    expect(within(routePage()).queryByText('0/10')).toBeNull();
+    expect(within(routePage()).queryByLabelText('Include the return journey')).toBeNull();
     fireEvent.change(within(routePage()).getByLabelText('Destination', { exact: true }), {
       target: { value: 'Albany, Auckland' },
     });
@@ -1736,6 +1819,20 @@ describe('phone map-first layout', () => {
     await noPageOpen();
     expect(routeCard()).toHaveTextContent('Albany');
     expect(window.history.state).toBeNull();
+  });
+
+  it('searches one place at a time with its actions listed underneath', async () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(routeCard());
+    fireEvent.focus(within(routePage()).getByLabelText('Starting point', { exact: true }));
+    expect(within(routePage()).getByLabelText('Destination', { exact: true })).not.toBeVisible();
+    expect(within(routePage()).getByRole('button', { name: 'Use my location' })).toBeVisible();
+    expect(window.history.state).toMatchObject({ smartCommuteLayer: 2 });
+    act(() => window.history.back());
+    await waitFor(() =>
+      expect(within(routePage()).getByLabelText('Destination', { exact: true })).toBeVisible(),
+    );
+    expect(routePage()).toBeInTheDocument();
   });
 
   it('closes stacked pages one at a time with the system back button', async () => {
@@ -1758,50 +1855,179 @@ describe('phone map-first layout', () => {
     const page = screen.getByRole('dialog', { name: 'Adjust fares and costs' });
     changeNumber('Fuel price (NZ$/L)', '5');
     expect(page).toHaveTextContent('18.62');
-    expect(screen.getByTestId('cost-drive')).toHaveTextContent('18.62');
     fireEvent.click(within(page).getByRole('button', { name: 'Done' }));
     await noPageOpen();
     expect(screen.getByTestId('selected-cost')).toHaveTextContent('18.62');
   });
 
-  it('plans live routes only when the route page is confirmed and restores them on discard', async () => {
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
-    expect(google.initializeMap.mock.calls[0]![2]).toEqual({ fullscreenControl: false });
-    expect(google.attachAutocomplete).not.toHaveBeenCalled();
-
-    fireEvent.click(routeCard());
-    await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
-    fireEvent.click(within(routePage()).getByLabelText('Include the return journey'));
-    fireEvent.click(within(routePage()).getByRole('button', { name: 'Public transport' }));
-    fireEvent.click(within(routePage()).getByRole('button', { name: 'Drive' }));
+  it('starts a new live trip one way and now, with drive and transit always in the sheet', async () => {
+    await renderLivePhone();
+    expect(routeCard()).toHaveTextContent('Leave now · one way');
+    expect(screen.getByRole('button', { name: 'Map pick' })).toBeInTheDocument();
+    const drive = within(sheet()).getByRole('button', { name: 'Drive' });
+    expect(drive).toHaveAttribute('aria-pressed', 'true');
+    expect(within(sheet()).getByRole('button', { name: 'Public transport' })).toBeEnabled();
+    // Opening the map is not a route request.
     expect(google.getRoutes).not.toHaveBeenCalled();
-    fireEvent.click(within(routePage()).getByRole('button', { name: 'Plan route' }));
-    await screen.findByTestId('cost-google-drive-test');
-    await noPageOpen();
-    expect(google.getRoutes).toHaveBeenCalledTimes(1);
-    expect(google.getRoutes.mock.calls[0]![0]).toMatchObject({ mode: 'drive', roundTrip: false });
-    expect(google.renderRoute).toHaveBeenLastCalledWith(
-      'google-drive-test',
-      expect.objectContaining({ padding: expect.objectContaining({ top: expect.any(Number) }) }),
-    );
+  });
 
-    fireEvent.click(routeCard());
-    const destination = await within(routePage()).findByLabelText('Destination', {
-      exact: true,
-    });
-    fireEvent.input(destination, { target: { value: 'Albany, Auckland' } });
-    await waitFor(() =>
-      expect(screen.queryByTestId('cost-google-drive-test')).not.toBeInTheDocument(),
+  it('shows the latest mode only, even when an older request answers last', async () => {
+    const driving = deferred<ReturnType<typeof liveResponse>>();
+    const transit = deferred<ReturnType<typeof liveResponse>>();
+    google.getRoutes
+      .mockImplementationOnce(() => driving.promise)
+      .mockImplementationOnce(() => transit.promise);
+    await renderLivePhone();
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Plan route' }));
+    expect(await within(sheet()).findByText('Finding driving routes…')).toBeInTheDocument();
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Public transport' }));
+    expect(
+      await within(sheet()).findByText('Finding public transport routes…'),
+    ).toBeInTheDocument();
+    expect(within(sheet()).getByRole('button', { name: 'Public transport' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
     );
-    fireEvent.click(
-      within(routePage()).getByRole('button', { name: 'Discard changes and go back' }),
-    );
-    await noPageOpen();
-    expect(await screen.findByTestId('cost-google-drive-test')).toBeInTheDocument();
-    expect(routeCard()).toHaveTextContent('Britomart');
-    // The debounced refresh must not fire for a restored trip.
-    await new Promise((resolve) => setTimeout(resolve, 900));
+    // One request at a time: the newer choice waits for the running one.
     expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    await act(async () => driving.resolve(liveResponse('google-drive-late')));
+    expect(screen.queryByTestId('route-card-google-drive-late')).not.toBeInTheDocument();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(2));
+    expect(google.getRoutes.mock.calls[1]![0]).toMatchObject({ mode: 'transit' });
+    const transitRoute = liveResponse('google-transit-now');
+    transitRoute.routes[0]!.mode = 'transit' as 'drive';
+    await act(async () => transit.resolve(transitRoute));
+    expect(await screen.findByTestId('route-card-google-transit-now')).toBeInTheDocument();
+    expect(google.renderRoute).toHaveBeenLastCalledWith('google-transit-now', expect.anything());
+
+    // The late driving answer was kept for its own conditions and comes back without a request.
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Drive' }));
+    expect(await screen.findByTestId('route-card-google-drive-late')).toBeInTheDocument();
+    expect(google.getRoutes).toHaveBeenCalledTimes(2);
+    expect(google.renderRoute).toHaveBeenLastCalledWith('google-drive-late', expect.anything());
+  });
+
+  it('tells no route apart from a failed request, and keeps retry and mode switching', async () => {
+    google.getRoutes.mockRejectedValueOnce(
+      new RouteProviderError('NO_ROUTES', 'Google returned no routes for these inputs.'),
+    );
+    await renderLivePhone();
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Plan route' }));
+    expect(
+      await within(sheet()).findByText('No driving route was found for these places at this time.'),
+    ).toBeInTheDocument();
+    for (const name of ['Change time', 'Try Public transport', 'Try again'])
+      expect(within(sheet()).getByRole('button', { name })).toBeEnabled();
+
+    google.getRoutes.mockRejectedValueOnce(
+      new RouteProviderError('INVALID_INPUT', 'Google could not use these places.'),
+    );
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Try again' }));
+    expect(await within(sheet()).findByText(/could not use these places or times/)).toBeVisible();
+    expect(within(sheet()).queryByText(/No driving route/)).not.toBeInTheDocument();
+    expect(within(sheet()).getByRole('button', { name: 'Estimate manually' })).toBeEnabled();
+    expect(google.getRoutes).toHaveBeenCalledTimes(2);
+  });
+
+  it('plans a saved trip once when the map is ready, without repeating', async () => {
+    localStorage.setItem(
+      'smart-commute-nz:v1',
+      JSON.stringify({
+        origin: { label: '4 Fong Road, Auckland' },
+        destination: { label: 'Saved destination, Auckland' },
+        settings: { ...DEFAULT_SETTINGS, roundTrip: false },
+        options: createExampleOptions(),
+        leaveNow: true,
+        timesVersion: 2,
+      }),
+    );
+    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    expect(await screen.findByTestId('route-card-google-drive-test')).toBeInTheDocument();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    act(() => window.history.back());
+    await noPageOpen();
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a found outbound route when no return exists at the chosen time', async () => {
+    google.getRoutes.mockResolvedValueOnce({
+      ...liveResponse('google-out-only'),
+      returnStatus: 'no-routes' as const,
+    });
+    await renderLivePhone();
+    fireEvent.click(routeCard());
+    fireEvent.click(within(routePage()).getByRole('button', { name: /Leave now · one way/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Return trip' }));
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Return journey' })).getByRole('button', {
+        name: 'Choose a time',
+      }),
+    );
+    fireEvent.change(screen.getByLabelText('Return time', { exact: true }), {
+      target: { value: localDateTime(new Date(Date.now() + 9 * 3600_000).toISOString()) },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    fireEvent.click(await within(routePage()).findByRole('button', { name: 'Plan route' }));
+    await noPageOpen();
+    expect(
+      await within(sheet()).findByText(
+        'Outbound route found; no return route at the chosen return time.',
+      ),
+    ).toBeInTheDocument();
+    // The outbound is never copied into a return to fake a complete round trip.
+    expect(screen.queryByTestId('selected-cost')).not.toBeInTheDocument();
+    expect(within(sheet()).getByRole('button', { name: 'Make it one way' })).toBeEnabled();
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Use a budget estimate' }));
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(2));
+    expect(google.getRoutes.mock.calls[1]![0]).toMatchObject({ roundTrip: false });
+    expect(
+      await within(sheet()).findByText(/return budget estimate · return not live/),
+    ).toBeVisible();
+  });
+
+  it('sends Auckland instants for a scheduled commute and checks their order first', async () => {
+    google.getRoutes.mockResolvedValueOnce(liveResponse('google-commute', true));
+    await renderLivePhone();
+    fireEvent.click(routeCard());
+    fireEvent.click(within(routePage()).getByRole('button', { name: /Leave now · one way/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Return trip' }));
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Departure' })).getByRole('button', {
+        name: 'Choose a time',
+      }),
+    );
+    fireEvent.change(screen.getByLabelText('Departure time', { exact: true }), {
+      target: { value: '2026-10-13T08:00' },
+    });
+    fireEvent.click(
+      within(screen.getByRole('group', { name: 'Return journey' })).getByRole('button', {
+        name: 'Choose a time',
+      }),
+    );
+    fireEvent.change(screen.getByLabelText('Return time', { exact: true }), {
+      target: { value: '2026-10-13T07:00' },
+    });
+    expect(screen.getByText('The return time must be after the departure.')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await within(routePage()).findByRole('button', { name: 'Plan route' })).toBeDisabled();
+    // The summary adds the date only when the trip is not today in Auckland.
+    fireEvent.click(within(routePage()).getByRole('button', { name: /^Leave .*08:00/ }));
+    fireEvent.change(screen.getByLabelText('Return time', { exact: true }), {
+      target: { value: '2026-10-13T18:00' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(
+      await within(routePage()).findByRole('button', {
+        name: /08:00 · return (13 Oct )?18:00/,
+      }),
+    ).toBeInTheDocument();
+    fireEvent.click(within(routePage()).getByRole('button', { name: 'Plan route' }));
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    const request = google.getRoutes.mock.calls[0]![0];
+    // 08:00 and 18:00 in Auckland daylight time, wherever the browser is.
+    expect(request.departureTime.getTime()).toBe(Date.UTC(2026, 9, 12, 19, 0));
+    expect(request.returnTime.getTime()).toBe(Date.UTC(2026, 9, 13, 5, 0));
+    expect(request.roundTrip).toBe(true);
   });
 });
