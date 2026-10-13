@@ -49,6 +49,25 @@ Compute Routes is billed per request. Basic routes with at most ten intermediate
 
 `getMetrics()` reports route requests/errors, map initialization count, selected-place detail requests and geocoding requests. It does **not** measure autocomplete predictions generated internally by the widget and is not a billing meter. A local default limit of 30 route requests per provider session bounds route calculations and debounced refreshes; reloading resets it. It does not cap project-wide costs. Set API quota limits in your own Google project, and monitor billing. Billing budgets are alerts, not hard spending caps.
 
+## Capping usage
+
+The browser key is public by design, and the in-app limit of 30 route requests resets on every reload, so neither stops someone from running up charges. Two settings in your Google Cloud project do:
+
+1. **Restrict the key.** In **APIs & Services → Credentials**, open the key. Under **Application restrictions** choose **Websites** and list only your deployed origins (for example `https://gforgalen.github.io/*`, the Render URL) and any local origins you use. Under **API restrictions** allow only Maps JavaScript API, Routes API, Places API (New) and, if used, Geocoding API.
+2. **Set daily quotas.** In **Google Maps Platform → Quotas**, pick each API, tick its per-day quota, choose **Edit** and enter a value. Where an API offers a per-user, per-minute quota, set that too. Quotas count successful requests and server errors. They cap request volume, unlike budgets, which only send alerts.
+
+Daily caps that keep a month within each free allowance above (allowance ÷ 31, rounded down):
+
+| API and quota                    | Suggested daily cap |
+| -------------------------------- | ------------------: |
+| Maps JavaScript API, map loads   |                 300 |
+| Routes API, Compute Routes (Pro) |                 150 |
+| Places API (New), Autocomplete   |                 300 |
+| Places API (New), Place Details  |                 300 |
+| Geocoding API                    |                 300 |
+
+When a quota runs out, Google answers `QUOTA_EXCEEDED`. The planner already treats that as a reason to switch to Manual Mode, so the calculator keeps working; the live map and routes return after the quota resets. Set the caps lower while testing. A budget with email alerts (**Billing → Budgets & alerts**) is still worth adding, but it does not stop spending. See Google's [cost management](https://developers.google.com/maps/billing-and-pricing/manage-costs) and [capping API usage](https://docs.cloud.google.com/apis/docs/capping-api-usage) guides.
+
 ## Attribution and persistence
 
 Draw route geometry only on the Google map, preserve its attribution, show the adapter's Google Maps attribution next to derived results, and retain any returned transit agency attribution. Route warnings are passed through. Do not hide Google controls/attribution with overlays.
