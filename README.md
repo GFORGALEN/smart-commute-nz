@@ -248,6 +248,17 @@ The CI sets `VITE_BASE_PATH=/smart-commute-nz/` for the repository subpath. If y
 rename the repository, change this value and links above. A custom domain/root
 deployment should use `/`. Local Vite defaults to `/`; do not commit a real `.env`.
 
+### Security headers
+
+`render.yaml` sends `X-Content-Type-Options`, `Referrer-Policy`, a `Permissions-Policy`
+that limits location to this app, and a report-only Content Security Policy built from
+Google's Maps allowlist plus Open-Meteo. GitHub Pages cannot set response headers, so
+these apply to the Render deployment only. Report-only blocks nothing: open the deployed
+site with the Google key, plan a driving and a public transport route, search an address,
+and check the console for `Content-Security-Policy-Report-Only` messages. When there are
+none, rename the header to `Content-Security-Policy` to enforce it. There is no
+`frame-ancestors` rule, because the planner can be embedded in an iframe.
+
 ## Privacy, data and license
 
 Preferences and user-entered places/routes stay in this browser's localStorage.

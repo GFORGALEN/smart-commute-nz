@@ -22,6 +22,16 @@ services:
       - path: /*
         name: Referrer-Policy
         value: strict-origin-when-cross-origin
+      # Location only for this app (an embedding page can still delegate it with allow=geolocation).
+      - path: /*
+        name: Permissions-Policy
+        value: geolocation=(self), camera=(), microphone=(), payment=(), usb=()
+      # Report-only: violations appear in the browser console and nothing is blocked. Google's
+      # Maps allowlist plus Open-Meteo; no frame-ancestors, because the planner is embeddable in
+      # an iframe. Once a live session shows no violations, rename the header to enforce it.
+      - path: /*
+        name: Content-Security-Policy-Report-Only
+        value: "default-src 'self'; script-src 'self' 'unsafe-eval' https://*.googleapis.com https://*.gstatic.com *.google.com *.googleusercontent.com blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: blob: https://*.googleapis.com https://*.gstatic.com *.google.com *.googleusercontent.com; connect-src 'self' https://*.googleapis.com *.google.com https://*.gstatic.com https://api.open-meteo.com data: blob:; font-src 'self' https://fonts.gstatic.com; frame-src *.google.com; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
       # The service worker must be revalidated so a new deploy replaces the offline shell.
       - path: /sw.js
         name: Cache-Control
