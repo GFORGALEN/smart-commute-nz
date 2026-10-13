@@ -43,6 +43,10 @@ not cache Google Maps/Places or AT responses. Local development has no service w
 - Swap places, save places, request browser geolocation only on a button click.
 - Fuel, parking, fares, tolls and optional maintenance breakdown; daily, weekly
   and monthly projections with editable commute frequency.
+- Petrol, diesel, hybrid, plug-in hybrid and electric cars: electricity for battery
+  driving and NZTA road user charges for diesel, electric and plug-in hybrids.
+- A buy-a-car check: depreciation, insurance, rego and WoF per month against public
+  transport, with the AT HOP 7-day cap, for one to seven commute days a week.
 - Cheapest, fastest, fewest transfers, and time-value ranking. The generalized
   score is a decision metric, not an actual payable charge.
 - English and Simplified Chinese; desktop and mobile layouts; local preferences.

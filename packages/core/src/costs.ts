@@ -7,6 +7,7 @@ import type {
   RouteComparison,
   RouteResult,
   TravelLeg,
+  VehicleKind,
   WarningCode,
 } from './types';
 
@@ -24,7 +25,55 @@ export const DEFAULT_SETTINGS: Readonly<CommuteSettings> = Object.freeze({
   maintenancePerKm: 0.08,
   /** Typical petrol idle and creep consumption in stop-go traffic; editable per vehicle. */
   congestionFuelPerHour: 0.8,
+  vehicleKind: 'petrol',
+  rucPer1000Km: 0,
+  electricityConsumption: 17,
+  /** MBIE QSDEP, Auckland Central retail price on 15 August 2026 (checked 13 Oct 2026). */
+  electricityPrice: 0.41,
+  electricShare: 0.5,
 });
+
+/**
+ * Starting values when someone picks a vehicle type; every one stays editable.
+ * RUC: NZTA light vehicles up to 3,500 kg, NZ$76 per 1,000 km, and plug-in petrol hybrids
+ * NZ$38 (type 12), GST inclusive (checked 13 Oct 2026). Petrol and diesel prices: MBIE weekly
+ * board prices for the week ending 2 October 2026 (regular NZ$3.47, diesel NZ$3.20 per litre).
+ * Consumption figures are typical examples, not measurements of a particular car.
+ */
+export const VEHICLE_PRESETS: Readonly<Record<VehicleKind, Readonly<Partial<CommuteSettings>>>> =
+  Object.freeze({
+    petrol: { fuelPrice: 3.5, fuelConsumption: 8.2, congestionFuelPerHour: 0.8, rucPer1000Km: 0 },
+    diesel: { fuelPrice: 3.2, fuelConsumption: 7, congestionFuelPerHour: 0.8, rucPer1000Km: 76 },
+    hybrid: { fuelPrice: 3.5, fuelConsumption: 4.5, congestionFuelPerHour: 0.3, rucPer1000Km: 0 },
+    'plug-in-hybrid': {
+      fuelPrice: 3.5,
+      fuelConsumption: 6,
+      congestionFuelPerHour: 0.3,
+      rucPer1000Km: 38,
+      electricityConsumption: 18,
+      electricShare: 0.5,
+    },
+    electric: { congestionFuelPerHour: 0, rucPer1000Km: 76, electricityConsumption: 17 },
+  });
+
+const vehicleKinds = new Set<VehicleKind>([
+  'petrol',
+  'diesel',
+  'hybrid',
+  'plug-in-hybrid',
+  'electric',
+]);
+
+/** How much of the driven distance runs on fuel and how much on the battery. */
+export function energyShares(settings: CommuteSettings): { fuel: number; electric: number } {
+  const kind = settings.vehicleKind ?? 'petrol';
+  if (kind === 'electric') return { fuel: 0, electric: 1 };
+  if (kind === 'plug-in-hybrid') {
+    const electric = settings.electricShare ?? DEFAULT_SETTINGS.electricShare!;
+    return { fuel: 1 - electric, electric };
+  }
+  return { fuel: 1, electric: 0 };
+}
 
 const travelModes = new Set(['drive', 'bus', 'train', 'walk', 'wait', 'parking']);
 const journeyModes = new Set(['drive', 'transit', 'hybrid']);
@@ -141,8 +190,20 @@ function validateSettings(settings: CommuteSettings): void {
   ] as const) {
     nonNegative(settings[key], `settings.${key}`);
   }
-  if (settings.congestionFuelPerHour !== undefined)
-    nonNegative(settings.congestionFuelPerHour, 'settings.congestionFuelPerHour');
+  for (const key of [
+    'congestionFuelPerHour',
+    'rucPer1000Km',
+    'electricityConsumption',
+    'electricityPrice',
+    'electricShare',
+  ] as const) {
+    const value = settings[key];
+    if (value !== undefined) nonNegative(value, `settings.${key}`);
+  }
+  if (settings.electricShare !== undefined && settings.electricShare > 1)
+    throw new RangeError('settings.electricShare must be at most one.');
+  if (settings.vehicleKind !== undefined && !vehicleKinds.has(settings.vehicleKind))
+    throw new TypeError('settings.vehicleKind is not supported.');
   if (settings.daysPerWeek > 7) throw new RangeError('settings.daysPerWeek must be at most seven.');
   if (typeof settings.roundTrip !== 'boolean') {
     throw new TypeError('settings.roundTrip must be a boolean.');
@@ -195,6 +256,7 @@ export function calculateFuelCost(
 function zeroTotals(): LegTotals {
   return {
     fuelCost: 0,
+    rucCost: 0,
     congestionFuelCost: 0,
     congestionMinutes: 0,
     fareCost: 0,
@@ -211,6 +273,10 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
   const result = zeroTotals();
   let minimumFareCost = 0;
   let hasFareRange = false;
+  const shares = energyShares(settings);
+  const electricityPerKm =
+    ((settings.electricityConsumption ?? DEFAULT_SETTINGS.electricityConsumption!) / 100) *
+    (settings.electricityPrice ?? DEFAULT_SETTINGS.electricityPrice!);
   for (const leg of legs) {
     if (
       leg.source === 'google' &&
@@ -225,17 +291,21 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
     }
     const distanceKm = leg.distanceKm ?? 0;
     if (leg.mode === 'drive') {
-      result.fuelCost += calculateFuelCost(
-        distanceKm,
-        leg.fuelConsumption ?? settings.fuelConsumption,
-        settings.fuelPrice,
-      );
+      result.fuelCost +=
+        calculateFuelCost(
+          distanceKm,
+          leg.fuelConsumption ?? settings.fuelConsumption,
+          settings.fuelPrice,
+        ) *
+          shares.fuel +
+        distanceKm * electricityPerKm * shares.electric;
+      result.rucCost += (distanceKm / 1000) * (settings.rucPer1000Km ?? 0);
       result.maintenanceCost += distanceKm * settings.maintenancePerKm;
-      // Delay in traffic burns fuel beyond the distance-based estimate.
+      // Delay in traffic burns fuel beyond the distance-based estimate; a battery barely idles.
       const delay = leg.congestionMinutes ?? 0;
       result.congestionMinutes += delay;
       result.congestionFuelCost +=
-        (delay / 60) * (settings.congestionFuelPerHour ?? 0) * settings.fuelPrice;
+        (delay / 60) * (settings.congestionFuelPerHour ?? 0) * settings.fuelPrice * shares.fuel;
     }
     result.fareCost += leg.fare ?? leg.fareRange?.max ?? 0;
     minimumFareCost += leg.fare ?? leg.fareRange?.min ?? 0;
@@ -247,6 +317,7 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
   }
   result.totalCost =
     result.fuelCost +
+    result.rucCost +
     result.congestionFuelCost +
     result.fareCost +
     result.tollCost +
@@ -256,6 +327,7 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
     result.totalCostRange = {
       min:
         result.fuelCost +
+        result.rucCost +
         result.congestionFuelCost +
         minimumFareCost +
         result.tollCost +
@@ -267,6 +339,7 @@ function calculateLegs(legs: TravelLeg[], settings: CommuteSettings): LegTotals 
   }
   for (const key of [
     'fuelCost',
+    'rucCost',
     'congestionFuelCost',
     'congestionMinutes',
     'fareCost',
@@ -291,6 +364,7 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
   const outbound = calculateLegs(option.outbound, settings);
   const inbound = settings.roundTrip ? calculateLegs(option.inbound, settings) : zeroTotals();
   const fuelCost = outbound.fuelCost + inbound.fuelCost;
+  const rucCost = outbound.rucCost + inbound.rucCost;
   const congestionFuelCost = outbound.congestionFuelCost + inbound.congestionFuelCost;
   const congestionMinutes = outbound.congestionMinutes + inbound.congestionMinutes;
   const fareCost = outbound.fareCost + inbound.fareCost;
@@ -330,6 +404,7 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
     mode: option.mode,
     totalCost,
     fuelCost,
+    rucCost,
     congestionFuelCost,
     congestionMinutes,
     fareCost,
@@ -385,6 +460,7 @@ export function calculateOption(option: JourneyOption, settings: CommuteSettings
   for (const key of [
     'totalCost',
     'fuelCost',
+    'rucCost',
     'congestionFuelCost',
     'congestionMinutes',
     'fareCost',
