@@ -14,7 +14,7 @@ async function walk(directory) {
 }
 
 const files = (await walk('dist')).filter(
-  (file) => /\.(html|js|css|svg)$/.test(file) && !file.endsWith('sw.js'),
+  (file) => /\.(html|js|css|svg|png|webmanifest)$/.test(file) && !file.endsWith('sw.js'),
 );
 const precache = files.map((file) => `./${file.replaceAll('\\', '/').replace(/^dist\//, '')}`);
 const digest = createHash('sha256');

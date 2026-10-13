@@ -27,7 +27,7 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET' || url.origin !== self.location.origin) return;
   const scope = new URL(self.registration.scope).pathname;
   if (!url.pathname.startsWith(scope)) return;
-  if (url.pathname.includes('/assets/') || url.pathname.endsWith('.svg')) {
+  if (url.pathname.includes('/assets/') || /\.(svg|png|webmanifest)$/.test(url.pathname)) {
     // These are public, versioned app assets. Preview servers add Vary: Origin;
     // precache fetches and module/style requests can send different Origin headers.
     event.respondWith(

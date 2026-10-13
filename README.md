@@ -50,6 +50,8 @@ not cache Google Maps/Places or AT responses. Local development has no service w
 - Cheapest, fastest, fewest transfers, and time-value ranking. The generalized
   score is a decision metric, not an actual payable charge.
 - English and Simplified Chinese; desktop and mobile layouts; local preferences.
+- Installable on phones and desktops (web app manifest and icons); the service worker
+  keeps the manual calculator available offline.
 - Vendor-independent core, optional Google Maps Routes/Places adapters and a dated
   Auckland Transport fare estimator with explicit limitations.
 
