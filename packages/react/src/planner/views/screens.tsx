@@ -248,9 +248,25 @@ export const renderRouteStatus = (m: PlannerModel, className: string) => {
 };
 
 export const renderBanners = (m: PlannerModel) => {
-  const { arrivalAt, aucklandClock, comparison, nameOf, online, returnBeforeArrival, t } = m;
+  const {
+    arrivalAt,
+    aucklandClock,
+    comparison,
+    fareSnapshotExpired,
+    fareSnapshotLastDay,
+    nameOf,
+    online,
+    returnBeforeArrival,
+    t,
+  } = m;
   return (
     <>
+      {fareSnapshotExpired && (
+        <p className="sc-connection-banner sc-incomplete-warning" role="status">
+          <Info size={16} />
+          {t('fareSnapshotExpired', { date: fareSnapshotLastDay })}
+        </p>
+      )}
       {returnBeforeArrival && (
         <p className="sc-connection-banner sc-incomplete-warning" role="alert">
           <Info size={16} />

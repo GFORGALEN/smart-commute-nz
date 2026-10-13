@@ -518,6 +518,21 @@ describe('SmartCommutePlanner offline workflows', () => {
     expect(screen.getByTestId('cost-drive')).toHaveTextContent('8.58');
   });
 
+  it('says when the AT fare table no longer covers today', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2027-01-31T09:00:00+13:00'));
+      const { unmount } = render(<SmartCommutePlanner {...defaultProps} />);
+      expect(screen.queryByText(/may now be out of date/)).not.toBeInTheDocument();
+      unmount();
+      vi.setSystemTime(new Date('2027-02-01T09:00:00+13:00'));
+      render(<SmartCommutePlanner {...defaultProps} />);
+      expect(screen.getByText(/covers travel until 31 January 2027/)).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows whether buying a car pays off for the commute', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Comparison' }));

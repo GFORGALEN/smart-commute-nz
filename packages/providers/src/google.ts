@@ -296,7 +296,11 @@ function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): Transit
       parts.find((value) => value.type === type)?.value ?? '';
     return `${part('year')}-${part('month')}-${part('day')}`;
   });
-  if (boardingDates.some((date) => date < AT_FARE_RULES.effectiveFrom || date >= '2027-02-01'))
+  if (
+    boardingDates.some(
+      (date) => date < AT_FARE_RULES.effectiveFrom || date >= AT_FARE_RULES.validUntil,
+    )
+  )
     throw new RouteProviderError(
       'INCOMPLETE_RESULT',
       'The AT fare snapshot does not cover this travel date. Enter a verified fare until the published table is refreshed.',

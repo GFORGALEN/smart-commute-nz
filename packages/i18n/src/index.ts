@@ -246,6 +246,8 @@ const en = {
   electricityExplanation:
     'The NZ$0.41 default is the MBIE retail price for Auckland Central on 15 Aug 2026. Night and EV plans are often cheaper; public fast chargers cost more.',
   ruc: 'Road user charges',
+  fareSnapshotExpired:
+    'The AT fare table in this app covers travel until {date} and may now be out of date. Public transport fares are no longer estimated; enter a verified fare.',
   electricity: 'Electricity',
   fuelAndElectricity: 'Fuel and electricity',
   buyCarHeading: 'Should you buy a car?',
@@ -782,6 +784,8 @@ const zh: Record<keyof typeof en, string> = {
   electricityExplanation:
     '默认 NZ$0.41 取自 MBIE 2026 年 8 月 15 日奥克兰市中心零售电价。夜间或电动车套餐通常更便宜，公共快充更贵。',
   ruc: '道路使用费 (RUC)',
+  fareSnapshotExpired:
+    '本应用的 AT 票价表只覆盖到 {date} 的出行，现在可能已过期。公共交通票价不再自动估算，请填写已核实的票价。',
   electricity: '电费',
   fuelAndElectricity: '油费与电费',
   buyCarHeading: '要不要买车？',

@@ -47,6 +47,8 @@ export interface FareProvider {
 export const AT_FARE_RULES = {
   verifiedOn: '2026-10-09',
   effectiveFrom: '2026-02-01',
+  /** First Auckland travel date this snapshot does not cover; AT reviews fares each February. */
+  validUntil: '2027-02-01',
   sourceUpdatedOn: '2026-08-13',
   sourceUrl: 'https://at.govt.nz/bus-train-ferry/fares-and-discounts/public-transport-fare-changes',
   adult: [3, 4.9, 6.5, 7.9],
@@ -82,6 +84,13 @@ function nzDate(date: Date) {
     weekend: part('weekday') === 'Sat' || part('weekday') === 'Sun',
     hour: Number(part('hour')),
   };
+}
+
+/** Whole Auckland days until the fare snapshot stops covering travel; zero or less once it has. */
+export function fareSnapshotDaysLeft(now: Date = new Date()): number {
+  const day = (value: string) =>
+    Date.UTC(+value.slice(0, 4), +value.slice(5, 7) - 1, +value.slice(8, 10));
+  return Math.round((day(AT_FARE_RULES.validUntil) - day(nzDate(now).day)) / 86_400_000);
 }
 
 export class ManualFareProvider implements FareProvider {
@@ -153,7 +162,7 @@ export class ATFareProvider implements FareProvider {
     const local = nzDate(dateTime);
     if (local.day < AT_FARE_RULES.effectiveFrom)
       return reject('This fare snapshot does not cover travel before 1 February 2026.');
-    if (local.day >= '2027-02-01')
+    if (local.day >= AT_FARE_RULES.validUntil)
       return reject(
         'The annual fare review may have changed this table. Enter a verified manual fare until the snapshot is refreshed.',
       );

@@ -20,6 +20,8 @@ import {
   resolveZonedTime,
 } from '@smart-commute/core';
 import {
+  AT_FARE_RULES,
+  fareSnapshotDaysLeft,
   GoogleRouteProvider,
   type PlaceHours,
   type RouteResult as ProviderRouteResult,
@@ -1780,7 +1782,14 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
 
   // Before there is anything to compare, the sheet is a short status with nothing to expand.
   const sheetExpandable = Boolean(comparison.result);
+  // Past its last covered day the AT table no longer prices transit, so say why.
+  const fareSnapshotExpired = fareSnapshotDaysLeft(new Date(currentMinute * 60000)) <= 0;
+  const fareSnapshotLastDay = new Intl.DateTimeFormat(locale === 'zh-CN' ? 'zh-CN' : 'en-NZ', {
+    timeZone: 'UTC',
+    dateStyle: 'long',
+  }).format(new Date(`${AT_FARE_RULES.validUntil}T00:00:00Z`).getTime() - 86_400_000);
   const sheetNotices =
+    fareSnapshotExpired ||
     !online ||
     comparison.incompleteOptions.length > 0 ||
     comparison.staleFareOptions.length > 0 ||
@@ -1810,6 +1819,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   ];
   return {
     props,
+    fareSnapshotExpired,
+    fareSnapshotLastDay,
     updateOwnership,
     chooseVehicle,
     carPurchase,
