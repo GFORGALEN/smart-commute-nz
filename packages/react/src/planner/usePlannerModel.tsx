@@ -1,14 +1,21 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Bus, Car, Route, TrainFront } from 'lucide-react';
 import {
+  analyseCarPurchase,
+  AT_HOP_WEEKLY_CAP,
   AUCKLAND_TIME_ZONE,
   type CommuteSettings,
+  compareOptions,
   type CostRange,
   EXAMPLE_INTERCHANGE_LABEL,
   type JourneyOption,
+  LICENCE_FEE_BY_VEHICLE,
   type Location,
+  type OwnershipCosts,
   type RouteResult,
   type TravelLeg,
+  VEHICLE_PRESETS,
+  type VehicleKind,
   createExampleOptions,
   resolveZonedTime,
 } from '@smart-commute/core';
@@ -594,6 +601,22 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
 
   const updateSettings = (patch: Partial<CommuteSettings>) =>
     setState((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
+  const updateOwnership = (patch: Partial<OwnershipCosts>) =>
+    setState((current) => ({ ...current, ownership: { ...current.ownership, ...patch } }));
+  /** A new vehicle type starts from its typical values; a rego left at the old default follows. */
+  const chooseVehicle = (kind: VehicleKind) =>
+    setState((current) => {
+      const previous = current.settings.vehicleKind ?? 'petrol';
+      const licenceWasDefault =
+        current.ownership.licencePerYear === LICENCE_FEE_BY_VEHICLE[previous];
+      return {
+        ...current,
+        settings: { ...current.settings, ...VEHICLE_PRESETS[kind], vehicleKind: kind },
+        ownership: licenceWasDefault
+          ? { ...current.ownership, licencePerYear: LICENCE_FEE_BY_VEHICLE[kind] }
+          : current.ownership,
+      };
+    });
   const updateOption = (id: string, patch: Partial<JourneyOption>) =>
     setState((current) => ({
       ...current,
@@ -1442,6 +1465,37 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     return { title: t('routeReady'), actions: ['plan'] };
   };
   const otherLiveMode: LiveMode = liveMode === 'drive' ? 'transit' : 'drive';
+  // A live comparison shows one mode at a time; the other mode's cached routes complete the pair.
+  const otherModeResults = (() => {
+    const entry = googleMode ? routeCache.current.fresh(queryKeyFor(otherLiveMode)) : undefined;
+    if (!entry?.response.routes.length) return [];
+    try {
+      return compareOptions(
+        liveOptions(entry.response, drivingPreference),
+        state.settings,
+      ).results.filter(
+        (result) =>
+          !result.warnings.includes('missing-return') && !result.warnings.includes('fare-pending'),
+      );
+    } catch {
+      return [];
+    }
+  })();
+  const carPurchase = (() => {
+    try {
+      return {
+        invalid: false,
+        analysis: analyseCarPurchase(
+          [...(comparison.result?.results ?? []), ...otherModeResults],
+          state.ownership,
+          state.settings.weeksPerMonth,
+          state.applyFareCap ? AT_HOP_WEEKLY_CAP : undefined,
+        ),
+      };
+    } catch {
+      return { invalid: true, analysis: null };
+    }
+  })();
   const statusActionLabel = (action: StatusAction) =>
     action === 'plan'
       ? t('planRoute')
@@ -1756,6 +1810,10 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   ];
   return {
     props,
+    updateOwnership,
+    chooseVehicle,
+    carPurchase,
+    otherLiveMode,
     switchLiveMode,
     plannerId,
     state,

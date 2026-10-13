@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   compareOptions,
   createExampleOptions,
+  DEFAULT_OWNERSHIP,
   DEFAULT_SETTINGS,
   type JourneyOption,
   type RouteResult,
@@ -20,6 +21,8 @@ const plannerState = (options: JourneyOption[] = createExampleOptions()): Planne
   returnTime: '',
   leaveNow: true,
   returnPolicy: 'estimate',
+  ownership: { ...DEFAULT_OWNERSHIP },
+  applyFareCap: true,
 });
 
 describe('buildComparison', () => {

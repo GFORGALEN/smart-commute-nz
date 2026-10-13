@@ -500,13 +500,48 @@ describe('SmartCommutePlanner offline workflows', () => {
     ).not.toBeInTheDocument();
   });
 
+  it('prices a diesel car with road user charges and an electric car by electricity', () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }));
+    fireEvent.change(screen.getByLabelText('Vehicle type'), { target: { value: 'diesel' } });
+    expect(screen.getByLabelText('Fuel price (NZ$/L)', { exact: true })).toHaveValue(3.2);
+    expect(screen.getByLabelText('Road user charges (NZ$/1,000 km)')).toHaveValue(76);
+    fireEvent.click(screen.getByRole('tab', { name: 'Planner' }));
+    // 38 km at 7 L/100 km and NZ$3.20, plus NZ$2.888 RUC and NZ$3.04 upkeep.
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('14.44');
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }));
+    fireEvent.change(screen.getByLabelText('Vehicle type'), { target: { value: 'electric' } });
+    expect(screen.queryByLabelText('Fuel price (NZ$/L)', { exact: true })).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Electricity price (NZ$/kWh)')).toHaveValue(0.41);
+    fireEvent.click(screen.getByRole('tab', { name: 'Planner' }));
+    // 38 km at 17 kWh/100 km and NZ$0.41, plus the same RUC and upkeep.
+    expect(screen.getByTestId('cost-drive')).toHaveTextContent('8.58');
+  });
+
+  it('shows whether buying a car pays off for the commute', () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(screen.getByRole('tab', { name: 'Comparison' }));
+    const section = screen.getByRole('region', { name: 'Should you buy a car?' });
+    // Example used car: NZ$2,000 a year depreciation, insurance, rego and WoF.
+    expect(section).toHaveTextContent('237.62');
+    expect(section).toHaveTextContent(/never costs less than public transport/);
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }));
+    fireEvent.change(screen.getByLabelText('Vehicle type'), { target: { value: 'electric' } });
+    fireEvent.click(screen.getByRole('tab', { name: 'Comparison' }));
+    fireEvent.change(screen.getByLabelText('Purchase price (NZ$)'), { target: { value: '6000' } });
+    fireEvent.change(screen.getByLabelText('Insurance per year (NZ$)'), { target: { value: '0' } });
+    expect(screen.getByRole('region', { name: 'Should you buy a car?' })).toHaveTextContent(
+      /From 2 commute days a week, owning a car costs no more/,
+    );
+  });
+
   it('switches the interface to Simplified Chinese while retaining costs', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.change(screen.getByLabelText('Language', { exact: true }), {
       target: { value: 'zh-CN' },
     });
     expect(screen.getByRole('tab', { name: '路线规划' })).toBeVisible();
-    expect(screen.getByLabelText('汽油单价 (NZ$/L)', { exact: true })).toHaveValue(3.5);
+    expect(screen.getByLabelText('油价 (NZ$/L)', { exact: true })).toHaveValue(3.5);
     expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
     expect(screen.getByText(/均为可编辑的假设/)).toBeVisible();
   });

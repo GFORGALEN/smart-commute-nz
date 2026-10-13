@@ -2,6 +2,7 @@ import {
   type CommuteSettings,
   type JourneyOption,
   type Location,
+  type OwnershipCosts,
   type RouteResult,
 } from '@smart-commute/core';
 import {
@@ -49,6 +50,10 @@ export interface PlannerState {
   returnFold?: 'earlier' | 'later';
   /** Times saved in an unknown browser time zone; they are used only after confirmation. */
   timesNeedReview?: boolean;
+  /** What a car costs to own, for the buy-a-car comparison. */
+  ownership: OwnershipCosts;
+  /** Whether public transport in that comparison stops at the AT HOP 7-day cap. */
+  applyFareCap: boolean;
 }
 export type LiveMode = 'drive' | 'transit';
 /** A route request's lifecycle, kept apart from the map's own loading state. */

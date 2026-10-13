@@ -1,11 +1,12 @@
 import { ArrowRight, Info, Moon, RotateCcw, Sun, WifiOff } from 'lucide-react';
-import { DEFAULT_SETTINGS, createExampleOptions } from '@smart-commute/core';
+import { DEFAULT_OWNERSHIP, DEFAULT_SETTINGS, createExampleOptions } from '@smart-commute/core';
 import { DATA_SOURCES } from '@smart-commute/providers';
 import { type Locale, type MessageKey } from '@smart-commute/i18n';
 import { STORAGE_KEY } from '../constants';
 import { NumberField } from '../fields';
 import { toLocation } from '../helpers';
 import { type PlannerModel } from '../usePlannerModel';
+import { renderCarFields } from './routeEditor';
 
 export const renderSettings = (m: PlannerModel) => {
   const {
@@ -31,20 +32,7 @@ export const renderSettings = (m: PlannerModel) => {
       <div className="sc-settings-grid">
         <div className="sc-surface">
           <h2>{t('carParameters')}</h2>
-          <div className="sc-field-grid">
-            <NumberField
-              label={t('fuelPrice')}
-              value={state.settings.fuelPrice}
-              onChange={(fuelPrice) => updateSettings({ fuelPrice })}
-              t={t}
-            />
-            <NumberField
-              label={t('fuelConsumption')}
-              value={state.settings.fuelConsumption}
-              onChange={(fuelConsumption) => updateSettings({ fuelConsumption })}
-              t={t}
-            />
-          </div>
+          {renderCarFields(m)}
           <NumberField
             label={t('maintenancePerKm')}
             value={state.settings.maintenancePerKm}
@@ -138,6 +126,8 @@ export const renderSettings = (m: PlannerModel) => {
                 departure: '',
                 returnTime: '',
                 leaveNow: true,
+                ownership: { ...DEFAULT_OWNERSHIP },
+                applyFareCap: true,
               });
               setSelectedId('drive');
               setNotice(t('resetDone'));

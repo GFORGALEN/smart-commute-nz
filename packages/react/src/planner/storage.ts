@@ -1,10 +1,13 @@
 import {
   AUCKLAND_TIME_ZONE,
+  DEFAULT_OWNERSHIP,
   DEFAULT_SETTINGS,
   type Location,
+  type OwnershipCosts,
   compareOptions,
   createExampleOptions,
   resolveZonedTime,
+  validateOwnership,
 } from '@smart-commute/core';
 import { MOBILE_QUERY, STORAGE_KEY, TIMES_VERSION } from './constants';
 import { hasGoogleProvenance, toLocation } from './helpers';
@@ -91,6 +94,17 @@ export function restoreTimes(
   };
 }
 
+/** Ownership costs saved before this comparison existed, or saved invalid, start from the examples. */
+function restoreOwnership(saved: unknown): OwnershipCosts {
+  try {
+    const ownership = { ...DEFAULT_OWNERSHIP, ...(saved as Partial<OwnershipCosts>) };
+    validateOwnership(ownership);
+    return ownership;
+  } catch {
+    return { ...DEFAULT_OWNERSHIP };
+  }
+}
+
 export function initialState(props: SmartCommutePlannerProps): PlannerState {
   // A new live trip on a phone starts one way and now; offline examples keep their round trip.
   const phone = typeof window !== 'undefined' && Boolean(window.matchMedia?.(MOBILE_QUERY).matches);
@@ -110,6 +124,8 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     returnTime: '',
     leaveNow: true,
     returnPolicy: 'estimate',
+    ownership: { ...DEFAULT_OWNERSHIP },
+    applyFareCap: true,
   };
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -151,6 +167,8 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
           })
         : [],
       ...restoreTimes(saved),
+      ownership: restoreOwnership(saved.ownership),
+      applyFareCap: typeof saved.applyFareCap === 'boolean' ? saved.applyFareCap : true,
     };
   } catch {
     return fallback;

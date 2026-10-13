@@ -24,6 +24,7 @@ import {
 import { ModeIcon } from '../fields';
 import { shortNumber } from '../helpers';
 import { type PlannerModel } from '../usePlannerModel';
+import { renderCarPurchase } from './carPurchase';
 import { renderRouteStatus } from './screens';
 
 export const renderSchematic = (m: PlannerModel, compact = false) => {
@@ -588,6 +589,7 @@ export const renderComparison = (m: PlannerModel) => {
             {t('breakdown')}
             <ChevronRight size={16} />
           </button>
+          {renderCarPurchase(m)}
         </>
       ) : (
         <p role="alert">{t(comparison.error ? 'validationSummary' : noComparableRoutesKey)}</p>
@@ -611,9 +613,15 @@ export const renderBreakdown = (m: PlannerModel) => {
     t,
     tripScope,
   } = m;
+  const kind = state.settings.vehicleKind ?? 'petrol';
+  const energyKey: MessageKey =
+    kind === 'electric' ? 'electricity' : kind === 'plug-in-hybrid' ? 'fuelAndElectricity' : 'fuel';
   const pieces: { key: MessageKey; value: number; range?: CostRange; color: string }[] = selected
     ? [
-        { key: 'fuel', value: selected.fuelCost, color: '#2b8b5f' },
+        { key: energyKey, value: selected.fuelCost, color: '#2b8b5f' },
+        ...(selected.rucCost > 0
+          ? [{ key: 'ruc' as const, value: selected.rucCost, color: '#4f7a3a' }]
+          : []),
         { key: 'congestionFuel', value: selected.congestionFuelCost, color: '#735824' },
         {
           key: 'fares',
@@ -684,7 +692,16 @@ export const renderBreakdown = (m: PlannerModel) => {
                   <dd>{moneyWithRange(selected.totalCost, selected.totalCostRange)}</dd>
                 </div>
               </dl>
-              <p className="sc-help">{t('formula')}</p>
+              <p className="sc-help">
+                {t(
+                  kind === 'electric'
+                    ? 'formulaElectric'
+                    : kind === 'plug-in-hybrid'
+                      ? 'formulaPlugIn'
+                      : 'formula',
+                )}
+              </p>
+              {selected.rucCost > 0 && <p className="sc-help">{t('formulaRuc')}</p>}
               {selected.totalCostRange && <p className="sc-help">{t('fareRangeBudgetHelp')}</p>}
             </div>
             <div className="sc-surface sc-budget-surface">

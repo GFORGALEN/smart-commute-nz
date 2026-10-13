@@ -1,5 +1,11 @@
 import { Bookmark, ChevronDown, Info, MapPin, Plus, RotateCcw, Trash2, X } from 'lucide-react';
-import { type JourneyOption, type TravelLeg } from '@smart-commute/core';
+import {
+  DEFAULT_SETTINGS,
+  type JourneyOption,
+  type TravelLeg,
+  type VehicleKind,
+} from '@smart-commute/core';
+import { type MessageKey } from '@smart-commute/i18n';
 import { ATFareHelper } from '../../ATFareHelper';
 import { directionKeys, legKeys } from '../constants';
 import { NumberField, TextField } from '../fields';
@@ -572,22 +578,91 @@ export const renderOptionEditor = (m: PlannerModel, option: JourneyOption, showT
   );
 };
 
+const vehicleLabels: Record<VehicleKind, MessageKey> = {
+  petrol: 'vehiclePetrol',
+  diesel: 'vehicleDiesel',
+  hybrid: 'vehicleHybrid',
+  'plug-in-hybrid': 'vehiclePlugInHybrid',
+  electric: 'vehicleElectric',
+};
+
+/** The vehicle and what it runs on; only the fields that apply to its type are shown. */
 export const renderCarFields = (m: PlannerModel) => {
-  const { state, t, updateSettings } = m;
+  const { chooseVehicle, state, t, updateSettings } = m;
+  const { settings } = state;
+  const kind = settings.vehicleKind ?? 'petrol';
+  const usesFuel = kind !== 'electric';
+  const usesBattery = kind === 'electric' || kind === 'plug-in-hybrid';
+  const paysRuc = kind === 'diesel' || usesBattery || (settings.rucPer1000Km ?? 0) > 0;
   return (
-    <div className="sc-field-grid">
-      <NumberField
-        label={t('fuelPrice')}
-        value={state.settings.fuelPrice}
-        onChange={(fuelPrice) => updateSettings({ fuelPrice })}
-        t={t}
-      />
-      <NumberField
-        label={t('fuelConsumption')}
-        value={state.settings.fuelConsumption}
-        onChange={(fuelConsumption) => updateSettings({ fuelConsumption })}
-        t={t}
-      />
+    <div className="sc-car-fields">
+      <label className="sc-field">
+        <span>{t('vehicleKind')}</span>
+        <select value={kind} onChange={(event) => chooseVehicle(event.target.value as VehicleKind)}>
+          {(Object.keys(vehicleLabels) as VehicleKind[]).map((option) => (
+            <option key={option} value={option}>
+              {t(vehicleLabels[option])}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="sc-help">{t('vehiclePresetHelp')}</p>
+      <div className="sc-field-grid">
+        {usesFuel && (
+          <>
+            <NumberField
+              label={t('fuelPrice')}
+              value={settings.fuelPrice}
+              onChange={(fuelPrice) => updateSettings({ fuelPrice })}
+              t={t}
+            />
+            <NumberField
+              label={t(kind === 'plug-in-hybrid' ? 'fuelConsumptionOnFuel' : 'fuelConsumption')}
+              value={settings.fuelConsumption}
+              onChange={(fuelConsumption) => updateSettings({ fuelConsumption })}
+              t={t}
+            />
+          </>
+        )}
+        {usesBattery && (
+          <>
+            <NumberField
+              label={t('electricityPrice')}
+              value={settings.electricityPrice ?? DEFAULT_SETTINGS.electricityPrice!}
+              onChange={(electricityPrice) => updateSettings({ electricityPrice })}
+              t={t}
+              step="0.01"
+            />
+            <NumberField
+              label={t('electricityConsumption')}
+              value={settings.electricityConsumption ?? DEFAULT_SETTINGS.electricityConsumption!}
+              onChange={(electricityConsumption) => updateSettings({ electricityConsumption })}
+              t={t}
+            />
+          </>
+        )}
+        {kind === 'plug-in-hybrid' && (
+          <NumberField
+            label={t('electricSharePercent')}
+            value={Math.round((settings.electricShare ?? DEFAULT_SETTINGS.electricShare!) * 100)}
+            onChange={(percent) => updateSettings({ electricShare: percent / 100 })}
+            t={t}
+            step="5"
+            max={100}
+          />
+        )}
+        {paysRuc && (
+          <NumberField
+            label={t('rucPer1000Km')}
+            value={settings.rucPer1000Km ?? 0}
+            onChange={(rucPer1000Km) => updateSettings({ rucPer1000Km })}
+            t={t}
+            step="1"
+          />
+        )}
+      </div>
+      {usesBattery && <p className="sc-help">{t('electricityExplanation')}</p>}
+      {paysRuc && <p className="sc-help">{t('rucExplanation')}</p>}
     </div>
   );
 };

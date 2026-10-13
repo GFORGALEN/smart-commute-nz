@@ -2079,6 +2079,34 @@ label.sc-route-measurements {
   min-width: 720px;
   border-collapse: collapse;
 }
+.sc-table-compact table {
+  min-width: 0;
+}
+.sc-table-wrap.sc-table-compact :is(th, td) {
+  padding: var(--sc-space-2) var(--sc-space-3);
+  white-space: normal;
+}
+.sc-car-purchase {
+  display: grid;
+  gap: var(--sc-space-3);
+  margin-top: var(--sc-space-5);
+}
+.sc-car-purchase h2,
+.sc-car-purchase p {
+  margin: 0;
+}
+.sc-car-purchase-empty {
+  display: grid;
+  gap: var(--sc-space-2);
+  justify-items: start;
+}
+.sc-car-purchase-verdict {
+  font-weight: 600;
+}
+.sc-car-fields {
+  display: grid;
+  gap: var(--sc-space-3);
+}
 .sc-table-wrap th {
   padding: var(--sc-space-3) var(--sc-space-4);
   border-bottom: 1px solid var(--sc-line);

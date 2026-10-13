@@ -71,9 +71,24 @@ export interface JourneyOption {
   returnBasis?: 'routed' | 'estimated-from-outbound';
 }
 
+/** Plug-in hybrids pay half-rate RUC and run partly on electricity; others use one energy source. */
+export type VehicleKind = 'petrol' | 'diesel' | 'hybrid' | 'plug-in-hybrid' | 'electric';
+
 export interface CommuteSettings {
+  /** Petrol or diesel price, NZD per litre. */
   fuelPrice: number;
+  /** Petrol or diesel use, litres per 100 km; for a plug-in hybrid, when running on fuel. */
   fuelConsumption: number;
+  /** Missing means petrol, which is how settings saved before vehicle types are read. */
+  vehicleKind?: VehicleKind;
+  /** Road user charges in NZD per 1,000 km; diesel and electric cars pay these, not fuel excise. */
+  rucPer1000Km?: number;
+  /** Electricity use, kWh per 100 km, for an electric car or a plug-in hybrid on battery. */
+  electricityConsumption?: number;
+  /** Electricity price, NZD per kWh. */
+  electricityPrice?: number;
+  /** Share of a plug-in hybrid's distance driven on battery, from 0 to 1. */
+  electricShare?: number;
   /** User-defined decision weight in NZD per hour; this is not a cash expense. */
   valueOfTime: number;
   daysPerWeek: number;
@@ -86,7 +101,9 @@ export interface CommuteSettings {
 }
 
 export interface LegTotals {
+  /** Fuel, or electricity for an electric car; a plug-in hybrid's share of both. */
   fuelCost: number;
+  rucCost: number;
   /** Extra fuel for traffic delay, separate from distance-based fuel. */
   congestionFuelCost: number;
   congestionMinutes: number;
@@ -116,6 +133,8 @@ export interface RouteResult {
   totalCost: number;
   totalCostRange?: CostRange;
   fuelCost: number;
+  /** Road user charges for the driven distance. */
+  rucCost: number;
   congestionFuelCost: number;
   congestionMinutes: number;
   fareCost: number;
