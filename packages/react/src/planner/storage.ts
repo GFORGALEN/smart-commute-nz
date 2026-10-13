@@ -2,6 +2,8 @@ import {
   AUCKLAND_TIME_ZONE,
   DEFAULT_OWNERSHIP,
   DEFAULT_SETTINGS,
+  EXAMPLE_ORIGIN,
+  isExamplePlace,
   type Location,
   type OwnershipCosts,
   compareOptions,
@@ -109,7 +111,7 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
   // A new live trip on a phone starts one way and now; offline examples keep their round trip.
   const phone = typeof window !== 'undefined' && Boolean(window.matchMedia?.(MOBILE_QUERY).matches);
   const fallback: PlannerState = {
-    origin: toLocation(props.origin ?? '4 Fong Road, Auckland'),
+    origin: toLocation(props.origin ?? (props.googleApiKey ? '' : EXAMPLE_ORIGIN)),
     destination: toLocation(props.destination),
     settings: {
       ...DEFAULT_SETTINGS,
@@ -143,7 +145,12 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     return {
       ...fallback,
       ...saved,
-      origin: props.origin ? toLocation(props.origin) : saved.origin,
+      // Live planning never restores the sample start that an earlier version filled in.
+      origin: props.origin
+        ? toLocation(props.origin)
+        : props.googleApiKey && isExamplePlace(saved.origin)
+          ? { label: '' }
+          : saved.origin,
       destination: toLocation(props.destination),
       settings: {
         ...saved.settings,

@@ -1,5 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
+import { EXAMPLE_DESTINATION, isExamplePlace } from '@smart-commute/core';
 import { SmartCommutePlanner } from '@smart-commute/react';
 import { createWeatherFixture, type WeatherFixtureKind } from '@smart-commute/providers';
 import './styles.css';
@@ -25,6 +26,7 @@ function savedAppearance(): { locale?: 'en' | 'zh-CN'; theme?: 'light' | 'dark' 
   return {};
 }
 const appearance = savedAppearance();
+const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || undefined;
 function savedDestination(): string | undefined {
   if (embedded) return undefined;
   try {
@@ -35,7 +37,9 @@ function savedDestination(): string | undefined {
         destination &&
         typeof destination === 'object' &&
         'label' in destination &&
-        typeof destination.label === 'string'
+        typeof destination.label === 'string' &&
+        // Live planning starts empty rather than at the sample destination saved earlier.
+        !(googleApiKey && isExamplePlace(destination as { label: string }))
       )
         return destination.label;
     }
@@ -66,7 +70,11 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <SmartCommutePlanner
       origin={parameters.get('origin') || undefined}
-      destination={parameters.get('destination') || savedDestination() || 'Britomart, Auckland'}
+      destination={
+        parameters.get('destination') ||
+        savedDestination() ||
+        (googleApiKey ? '' : EXAMPLE_DESTINATION)
+      }
       locale={
         parameters.has('locale')
           ? parameters.get('locale') === 'zh-CN'
@@ -81,7 +89,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             : 'light'
           : appearance.theme || 'light'
       }
-      googleApiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY || undefined}
+      googleApiKey={googleApiKey}
       weatherFixture={weatherFixture}
     />
   </React.StrictMode>,

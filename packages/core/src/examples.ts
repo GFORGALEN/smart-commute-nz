@@ -8,6 +8,21 @@ function manualLeg(
   return { mode, durationMinutes, source: 'manual', estimated: true, ...extras };
 }
 
+/**
+ * Places of the offline sample. Live planning starts with empty places instead, because
+ * these labels describe the sample distances and fares, not anyone's commute.
+ */
+export const EXAMPLE_ORIGIN = '4 Fong Road, Auckland';
+export const EXAMPLE_DESTINATION = 'Britomart, Auckland';
+
+/** A saved place that is still the untouched sample label, never chosen from search or the map. */
+export const isExamplePlace = (place: { label: string; coordinates?: unknown } | undefined) =>
+  Boolean(
+    place &&
+    !place.coordinates &&
+    (place.label === EXAMPLE_ORIGIN || place.label === EXAMPLE_DESTINATION),
+  );
+
 /** Stored label of the sample interchange; interfaces may show a translated equivalent. */
 export const EXAMPLE_INTERCHANGE_LABEL = 'User-selected interchange (example assumption)';
 

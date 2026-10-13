@@ -61,7 +61,8 @@ journey legs require reapplication. Quote verification is session-only, so saved
 fares need review after a reload. Saved manual distances, prices and preferences remain
 available offline.
 
-The initial scenario is **sample input, not a Google/AT lookup**: 4 Fong Road →
+With Google configured, the planner opens with empty places for you to choose. Without
+a key, it opens on **sample input, not a Google/AT lookup**: 4 Fong Road →
 Britomart, driving 19 km each way, park-and-ride driving 15 km each way, train
 fare NZ$4.90 and public transport fare NZ$6.50 each way, fuel 8.2 L/100 km at
 NZ$3.50/L, parking NZ$0. Durations are illustrative assumptions. In Manual Mode,

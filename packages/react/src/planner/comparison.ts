@@ -10,6 +10,8 @@ import { type PlannerState } from './types';
 export interface PlannerComparison {
   result: RouteComparison | null;
   error: boolean;
+  /** The only problem is a missing place; settings and manual inputs are valid. */
+  missingPlaces?: boolean;
   incompleteOptions: JourneyOption[];
   staleFareOptions: JourneyOption[];
   pendingFareOptions: JourneyOption[];
@@ -29,8 +31,14 @@ export function buildComparison(
 ): PlannerComparison {
   const empty = { incompleteOptions: [], staleFareOptions: [], pendingFareOptions: [] };
   try {
-    if (!state.origin.label.trim() || !state.destination.label.trim())
-      return { result: null, error: true, ...empty };
+    if (!state.origin.label.trim() || !state.destination.label.trim()) {
+      // Still check the inputs, so valid preferences can be kept while places are empty.
+      compareOptions(
+        state.options.filter((option) => !hasGoogleProvenance(option)),
+        state.settings,
+      );
+      return { result: null, error: true, missingPlaces: true, ...empty };
+    }
     if (!visibleOptions.length) {
       // Validate settings without presenting offline examples as live routes.
       compareOptions(

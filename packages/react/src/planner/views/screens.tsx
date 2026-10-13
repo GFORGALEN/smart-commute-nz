@@ -1,5 +1,10 @@
 import { ArrowRight, Info, Moon, RotateCcw, Sun, WifiOff } from 'lucide-react';
-import { DEFAULT_OWNERSHIP, DEFAULT_SETTINGS, createExampleOptions } from '@smart-commute/core';
+import {
+  DEFAULT_OWNERSHIP,
+  DEFAULT_SETTINGS,
+  EXAMPLE_ORIGIN,
+  createExampleOptions,
+} from '@smart-commute/core';
 import { DATA_SOURCES } from '@smart-commute/providers';
 import { type Locale, type MessageKey } from '@smart-commute/i18n';
 import { STORAGE_KEY } from '../constants';
@@ -116,7 +121,7 @@ export const renderSettings = (m: PlannerModel) => {
                 /* Storage is optional. */
               }
               setState({
-                origin: toLocation(props.origin ?? '4 Fong Road, Auckland'),
+                origin: toLocation(props.origin ?? (props.googleApiKey ? '' : EXAMPLE_ORIGIN)),
                 destination: toLocation(props.destination),
                 settings: { ...DEFAULT_SETTINGS },
                 returnPolicy: 'estimate',

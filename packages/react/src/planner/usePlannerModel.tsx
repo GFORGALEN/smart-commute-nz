@@ -528,7 +528,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     };
   }, [provider]);
   useEffect(() => {
-    if (comparison.error) return;
+    // Preferences are saved while a place is still empty, but never invalid inputs.
+    if (comparison.error && !comparison.missingPlaces) return;
     try {
       const manualOptions = state.options.filter((option) => !hasGoogleProvenance(option));
       for (const direction of ['origin', 'destination'] as const) {
@@ -570,6 +571,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   }, [
     state,
     comparison.error,
+    comparison.missingPlaces,
     locale,
     theme,
     departureEntry.instant,

@@ -46,6 +46,8 @@ vi.mock('@smart-commute/providers', async (importOriginal) => ({
 }));
 
 const defaultProps = { destination: 'Britomart, Auckland' };
+/** Live planning starts with no places; tests of a planned trip begin from a chosen start. */
+const liveStart = { origin: '4 Fong Road, Auckland' };
 const autocompleteSelectors: ((place: Location) => void)[] = [];
 const autocompleteCleanups: ReturnType<typeof vi.fn>[] = [];
 function liveResponse(id = 'google-drive-test', roundTrip = false) {
@@ -137,7 +139,13 @@ const expectMoneyRange = (element: HTMLElement, min: number, max: number) => {
 };
 async function renderGooglePlanner(extraProps: Partial<SmartCommutePlannerProps> = {}) {
   const result = render(
-    <SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" {...extraProps} />,
+    // Live planning starts with empty places; these tests begin from a chosen start.
+    <SmartCommutePlanner
+      {...defaultProps}
+      {...liveStart}
+      googleApiKey="restricted-test-key"
+      {...extraProps}
+    />,
   );
   await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(google.attachAutocomplete).toHaveBeenCalledTimes(2));
@@ -324,7 +332,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
-        origin: { label: '4 Fong Road, Auckland' },
+        origin: { label: '12 Queen Street, Auckland' },
         destination: { label: defaultProps.destination },
         settings: DEFAULT_SETTINGS,
         options: createExampleOptions().map((option) => ({ ...option, inbound: [] })),
@@ -353,7 +361,7 @@ describe('SmartCommutePlanner offline workflows', () => {
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
-        origin: { label: '4 Fong Road, Auckland' },
+        origin: { label: '12 Queen Street, Auckland' },
         destination: { label: defaultProps.destination },
         settings: DEFAULT_SETTINGS,
         options,
@@ -601,10 +609,49 @@ describe('SmartCommutePlanner offline workflows', () => {
 });
 
 describe('optional Google provider safeguards', () => {
+  it('starts live planning with no places and keeps preferences until places are chosen', async () => {
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    expect(await screen.findByLabelText('Starting point', { exact: true })).toHaveValue('');
+    expect(await screen.findByLabelText('Destination', { exact: true })).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Plan route' })).toBeDisabled();
+    expect(google.getRoutes).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('tab', { name: 'Settings' }));
+    fireEvent.change(screen.getByLabelText('Vehicle type'), { target: { value: 'diesel' } });
+    expect(JSON.parse(localStorage.getItem('smart-commute-nz:v1')!).settings).toMatchObject({
+      vehicleKind: 'diesel',
+    });
+  });
+
+  it('drops the untouched sample start saved by an earlier version, but keeps a chosen one', async () => {
+    const saved = (origin: { label: string; coordinates?: { lat: number; lng: number } }) =>
+      localStorage.setItem(
+        'smart-commute-nz:v1',
+        JSON.stringify({
+          origin,
+          destination: { label: '' },
+          settings: DEFAULT_SETTINGS,
+          options: createExampleOptions(),
+          leaveNow: true,
+          timesVersion: 2,
+        }),
+      );
+    saved({ label: '4 Fong Road, Auckland' });
+    const { unmount } = render(
+      <SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />,
+    );
+    expect(await screen.findByLabelText('Starting point', { exact: true })).toHaveValue('');
+    unmount();
+    saved({ label: '4 Fong Road, Auckland', coordinates: { lat: -36.95, lng: 174.93 } });
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    expect(await screen.findByLabelText('Starting point', { exact: true })).toHaveValue(
+      '4 Fong Road, Auckland',
+    );
+  });
+
   it('initializes one map and one pair of address widgets in StrictMode, including a tab return', async () => {
     render(
       <StrictMode>
-        <SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />
+        <SmartCommutePlanner {...defaultProps} {...liveStart} googleApiKey="restricted-test-key" />
       </StrictMode>,
     );
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
@@ -648,7 +695,9 @@ describe('optional Google provider safeguards', () => {
 
   it('falls back to editable manual assumptions after a map failure and allows reconnection', async () => {
     google.initializeMap.mockRejectedValueOnce(new Error('Quota exceeded'));
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    render(
+      <SmartCommutePlanner {...defaultProps} {...liveStart} googleApiKey="restricted-test-key" />,
+    );
     await waitFor(() =>
       expect(screen.getByRole('alert')).toHaveTextContent(
         'Google Maps could not complete this request',
@@ -733,7 +782,7 @@ describe('optional Google provider safeguards', () => {
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
-        origin: { label: '4 Fong Road, Auckland' },
+        origin: { label: '12 Queen Street, Auckland' },
         destination: { label: defaultProps.destination },
         settings: DEFAULT_SETTINGS,
         options: createExampleOptions(),
@@ -756,7 +805,7 @@ describe('optional Google provider safeguards', () => {
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
-        origin: { label: '4 Fong Road, Auckland' },
+        origin: { label: '12 Queen Street, Auckland' },
         destination: { label: defaultProps.destination },
         settings: { ...DEFAULT_SETTINGS, roundTrip: false },
         options: createExampleOptions(),
@@ -976,6 +1025,11 @@ describe('optional Google provider safeguards', () => {
     expect(google.initializeMap).not.toHaveBeenCalled();
     expect(google.attachAutocomplete).not.toHaveBeenCalled();
     expect(google.getRoutes).not.toHaveBeenCalled();
+    // A live-capable planner starts without the sample start, even when it falls back offline.
+    expect(screen.getByLabelText('Starting point', { exact: true })).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Starting point', { exact: true }), {
+      target: { value: 'Manual offline start' },
+    });
     expect(screen.getByTestId('cost-drive')).toHaveTextContent('13.95');
     fireEvent.change(screen.getByLabelText('Destination', { exact: true }), {
       target: { value: 'Manual offline destination' },
@@ -1809,7 +1863,9 @@ describe('phone map-first layout', () => {
     return { promise, resolve, reject };
   };
   const renderLivePhone = async () => {
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    render(
+      <SmartCommutePlanner {...defaultProps} {...liveStart} googleApiKey="restricted-test-key" />,
+    );
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
     await within(sheet()).findByText('Places are ready. Plan the route to compare costs.');
   };
@@ -1983,7 +2039,7 @@ describe('phone map-first layout', () => {
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
-        origin: { label: '4 Fong Road, Auckland' },
+        origin: { label: '12 Queen Street, Auckland' },
         destination: { label: 'Saved destination, Auckland' },
         settings: { ...DEFAULT_SETTINGS, roundTrip: false },
         options: createExampleOptions(),
