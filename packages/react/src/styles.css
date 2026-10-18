@@ -2741,7 +2741,8 @@ label.sc-route-measurements {
   display: flex;
   flex: none;
   flex-direction: column;
-  max-height: 52%;
+  /* Two fifths for the costs and options; the map keeps the rest. */
+  max-height: 40%;
   padding-bottom: env(safe-area-inset-bottom);
   border-top: 1px solid var(--sc-line);
   border-radius: 16px 16px 0 0;

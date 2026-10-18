@@ -146,6 +146,8 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
           saved.settings.congestionFuelPerHour ?? DEFAULT_SETTINGS.congestionFuelPerHour,
         fuelPrice: props.fuelPrice ?? saved.settings.fuelPrice,
         fuelConsumption: props.fuelConsumption ?? saved.settings.fuelConsumption,
+        // Every live trip on a phone opens one way; a return is chosen per trip, not remembered.
+        ...(phone && props.googleApiKey ? { roundTrip: false } : {}),
       },
       places: Array.isArray(saved.places)
         ? saved.places.filter((place) => place && typeof place.label === 'string')

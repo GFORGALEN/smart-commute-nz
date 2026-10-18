@@ -96,6 +96,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const [searchField, setSearchField] = useState<'origin' | 'destination' | null>(null);
   const searchFieldRef = useRef(searchField);
   searchFieldRef.current = searchField;
+  // Set when a chosen place completes the trip, so it is planned without a tap on Plan route.
+  const autoPlanPending = useRef(false);
   const [schedulePanelOpen, setSchedulePanelOpen] = useState(false);
   const [routePanel, setRoutePanel] = useState<'stops' | 'more' | null>(null);
   const mobileTopRef = useRef<HTMLDivElement>(null);
@@ -1559,8 +1561,9 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   };
 
   const routeStatusView = (): { title: string; alert?: boolean; actions: StatusAction[] } => {
-    if (originMissing) return { title: t('routeNeedOrigin'), actions: ['edit'] };
+    // The start defaults to your location, so an empty trip only asks where to.
     if (destinationMissing) return { title: t('mobileWhereTo'), actions: ['edit'] };
+    if (originMissing) return { title: t('routeNeedOrigin'), actions: ['edit'] };
     if (comparison.error) return { title: t('validationSummary'), alert: true, actions: ['edit'] };
     if (!googleMode)
       return {
@@ -1789,7 +1792,10 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
       pageStackRef.current
         ?.querySelector<HTMLInputElement>(".sc-place-row[data-field='destination'] input")
         ?.focus();
-    } else setSearchField(null);
+    } else {
+      setSearchField(null);
+      autoPlanPending.current = true;
+    }
   };
   const restoreRouteDraft = (draft: RouteDraft) => {
     if (draft.fingerprint !== liveQueryFingerprint) restoredFingerprint.current = draft.fingerprint;
@@ -1925,6 +1931,30 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
       stopoverRoutingBlocked ||
       timesBlocked ||
       addressResolving > 0);
+  // Choosing the last place plans the trip at once, as a map app does. Plan route stays for when
+  // something holds it back: an address still resolving, the map loading, or invalid times.
+  const autoPlanAction = useRef(confirmRoute);
+  autoPlanAction.current = confirmRoute;
+  const placesReady = Boolean(state.origin.label.trim() && state.destination.label.trim());
+  useEffect(() => {
+    if (!autoPlanPending.current || !isMobile || !googleMode || !routeEditing) return;
+    if (searchField || schedulePanelOpen || locationLoading || !placesReady) return;
+    if (routeConfirmBlocked) return;
+    autoPlanPending.current = false;
+    autoPlanAction.current();
+  }, [
+    isMobile,
+    googleMode,
+    routeEditing,
+    searchField,
+    schedulePanelOpen,
+    locationLoading,
+    placesReady,
+    routeConfirmBlocked,
+  ]);
+  useEffect(() => {
+    if (!routeEditing) autoPlanPending.current = false;
+  }, [routeEditing]);
   // Times later than today carry their date so a summary never reads as today by mistake.
   const shortWhen = (instant: number) =>
     aucklandDay.format(instant) === aucklandDay.format(currentMinute * 60000)

@@ -2044,6 +2044,55 @@ describe('phone map-first layout', () => {
     expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $4.90');
   });
 
+  it('plans by itself once the destination is chosen, with no tap on Plan route', async () => {
+    const position = { coords: { latitude: -36.87, longitude: 174.78, accuracy: 20 } };
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      geolocation: {
+        getCurrentPosition: (success: (value: typeof position) => void) => success(position),
+      },
+    });
+    const britomart = {
+      id: 'bm',
+      main: 'Britomart',
+      secondary: 'Auckland',
+      text: 'Britomart, Auckland',
+    };
+    google.suggest.mockResolvedValue([britomart]);
+    google.select.mockResolvedValue({
+      label: 'Britomart, Auckland CBD, Auckland 1010, New Zealand',
+      coordinates: { lat: -36.8443, lng: 174.7678 },
+    });
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    // An empty trip only asks where to; the start is your location.
+    expect(within(sheet()).getByText('Where are you going?')).toBeVisible();
+    expect(within(sheet()).queryByText('Add a starting point')).not.toBeInTheDocument();
+    fireEvent.click(routeCard());
+    const destination = within(routePage()).getByLabelText('Destination', { exact: true });
+    fireEvent.change(destination, { target: { value: 'Brito' } });
+    fireEvent.click(await within(routePage()).findByRole('button', { name: /^Britomart/ }));
+    await noPageOpen();
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
+    expect(google.getRoutes.mock.calls[0]![0]).toMatchObject({ roundTrip: false });
+  });
+
+  it('opens each live phone trip one way even after a return trip was used', async () => {
+    localStorage.setItem(
+      'smart-commute-nz:v1',
+      JSON.stringify({
+        origin: { label: '' },
+        destination: { label: '' },
+        settings: { ...DEFAULT_SETTINGS, roundTrip: true },
+        options: createExampleOptions(),
+        timesVersion: 2,
+      }),
+    );
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    expect(routeCard()).toHaveTextContent('one way');
+  });
+
   it('switches language from the map in one tap', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Switch to Chinese' }));
