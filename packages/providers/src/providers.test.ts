@@ -744,6 +744,19 @@ describe('Google adapter without external paid requests', () => {
       });
     },
   );
+  it('prices AT services from the AT tariff and asks Google for no fare when told not to', async () => {
+    const route = transitRoute([atStep()]);
+    route.travelAdvisory = { transitFare: { currencyCode: 'NZD', units: 4, nanos: 900000000 } };
+    const { provider, computeRoutes } = mockGoogle([[route]], {
+      estimateMissingTransitFare: true,
+      useGoogleTransitFare: false,
+    });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(computeRoutes.mock.calls[0]?.[0].fields).not.toContain('travelAdvisory');
+    const leg = result.routes[0]!.outbound[0]!;
+    expect(leg.fare).toBeUndefined();
+    expect(leg).toMatchObject({ fareSource: 'at-estimate', fareRange: { min: 3, max: 7.9 } });
+  });
   it('prices outbound and return fare ranges independently without doubling one fare response', async () => {
     // Google accepts transit times only a week back, so the fixed return needs a fixed today.
     vi.useFakeTimers();

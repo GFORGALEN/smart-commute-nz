@@ -18,6 +18,9 @@
   --sc-accent-mark: #2b8b5f;
   --sc-accent-text: #1e6a45;
   --sc-accent-soft: #d8e2d6;
+  /* A paler green for a panel that holds text, such as the phone's chosen-route summary. */
+  --sc-accent-tint: #e8f2eb;
+  --sc-accent-tint-line: #cfe3d5;
   --sc-on-accent: #ffffff;
   --sc-secondary-text: #2f6079;
   --sc-warn-bg: #f6ebd6;
@@ -86,6 +89,8 @@
   --sc-accent-mark: #4fb585;
   --sc-accent-text: #7ccba3;
   --sc-accent-soft: #203a2d;
+  --sc-accent-tint: #19291f;
+  --sc-accent-tint-line: #28412f;
   --sc-on-accent: #062016;
   --sc-secondary-text: #93c0d6;
   --sc-warn-bg: #3a3122;
@@ -2767,6 +2772,25 @@ label.sc-route-measurements {
 .sc-sheet-head:first-child {
   padding-top: var(--sc-space-4);
 }
+/* The chosen route reads as its own pale green panel, apart from the white option list. */
+.sc-sheet-head.sc-sheet-head-selected {
+  margin: 0 var(--sc-gutter) var(--sc-space-2);
+  padding: var(--sc-space-2) var(--sc-space-1) var(--sc-space-2) var(--sc-space-3);
+  border: 1px solid var(--sc-accent-tint-line);
+  border-radius: 12px;
+  background: var(--sc-accent-tint);
+}
+.sc-sheet-head.sc-sheet-head-selected:first-child {
+  margin-top: var(--sc-space-3);
+}
+/* In the phone list the chosen option keeps a white row and a green edge, so only the
+   summary above is tinted. */
+.sc-sheet-options .sc-option.is-selected {
+  background: var(--sc-surface);
+}
+.sc-sheet-options .sc-option.is-selected .sc-sheet-card-name {
+  color: var(--sc-accent-text);
+}
 .sc-sheet-head > :first-child {
   flex: 1;
   min-width: 0;
@@ -2838,6 +2862,43 @@ label.sc-route-measurements {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
   line-clamp: 1;
+}
+/* AT zones: one tap names the zone count; the fare follows the AT table. */
+.sc-zone-picker {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: var(--sc-space-1);
+  margin-top: var(--sc-space-1);
+  font-size: var(--sc-fs-label);
+}
+.sc-zone-picker-label {
+  margin-right: var(--sc-space-1);
+  color: var(--sc-text-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.sc-zone-picker button {
+  flex: none;
+  min-width: 36px;
+  min-height: 32px;
+  border: 1px solid var(--sc-accent-tint-line);
+  border-radius: 8px;
+  background: var(--sc-surface);
+  color: var(--sc-text);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.sc-zone-picker button[aria-pressed='true'] {
+  border-color: var(--sc-accent);
+  background: var(--sc-accent);
+  color: var(--sc-on-accent);
+}
+.sc-zone-picker a {
+  margin-left: auto;
+  white-space: nowrap;
+  color: var(--sc-accent-text);
+  font-weight: 600;
 }
 .sc-sheet-source {
   grid-column: 1 / -1;

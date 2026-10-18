@@ -1995,6 +1995,24 @@ describe('phone map-first layout', () => {
     expect(window.history.state).toMatchObject({ smartCommuteLayer: 1 });
   });
 
+  it('prices public transport from the AT zones a rider picks, with no Google fare', async () => {
+    google.getRoutes.mockReset().mockResolvedValue(rangedTransitResponse());
+    await renderLivePhone();
+    expect(google.configure).toHaveBeenCalledWith(
+      expect.objectContaining({ useGoogleTransitFare: false }),
+    );
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Public transport' }));
+    const cost = await within(sheet()).findByTestId('selected-cost');
+    await waitFor(() => expect(cost).toHaveTextContent('$3.00–$7.90'));
+    const zones = within(sheet()).getByRole('group', {
+      name: 'How many AT fare zones this trip passes through',
+    });
+    fireEvent.click(within(zones).getByRole('button', { name: '2' }));
+    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $4.90');
+    fireEvent.click(within(zones).getByRole('button', { name: '2' }));
+    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('$3.00–$7.90');
+  });
+
   it('switches language from the map in one tap', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Switch to Chinese' }));

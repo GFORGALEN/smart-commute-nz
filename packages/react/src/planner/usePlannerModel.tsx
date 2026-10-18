@@ -45,7 +45,7 @@ import {
   googleErrorKeys,
   historyLayer,
 } from './constants';
-import { cloneOption, hasGoogleProvenance, shortNumber, toLocation } from './helpers';
+import { cloneOption, hasGoogleProvenance, shortNumber, toLocation, withATZones } from './helpers';
 import {
   failedRouteOutcome,
   liveOptions,
@@ -182,6 +182,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
         apiKey: props.googleApiKey,
         trafficAware: true,
         estimateMissingTransitFare: true,
+        // Transit is priced from the AT tariff and the zones a rider picks, not Google's fare.
+        useGoogleTransitFare: false,
       }),
     [props.googleApiKey],
   );
@@ -282,9 +284,27 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
         : option.id === 'hybrid'
           ? t('hybridName')
           : option.name;
+  // Zone counts picked on the phone sheet, per route and per set of trip conditions.
+  const [atZones, setATZones] = useState<Record<string, number>>({});
+  const atZoneKey = (optionId: string) => `${liveQueryFingerprint}|${optionId}`;
+  const pricedOptions = useMemo(
+    () =>
+      visibleOptions.map((option) => {
+        const zones = atZones[`${liveQueryFingerprint}|${option.id}`];
+        return zones ? withATZones(option, zones) : option;
+      }),
+    [visibleOptions, atZones, liveQueryFingerprint],
+  );
+  const chooseATZones = (optionId: string, zones: number | null) =>
+    setATZones((current) => {
+      const next = { ...current };
+      if (zones) next[atZoneKey(optionId)] = zones;
+      else delete next[atZoneKey(optionId)];
+      return next;
+    });
   const comparison = useMemo(
-    () => buildComparison(state, visibleOptions, atFareContexts, currentMinute),
-    [state, visibleOptions, atFareContexts, currentMinute],
+    () => buildComparison(state, pricedOptions, atFareContexts, currentMinute),
+    [state, pricedOptions, atFareContexts, currentMinute],
   );
   const noComparableRoutesKey: MessageKey =
     comparison.staleFareOptions.length || comparison.pendingFareOptions.length
@@ -1973,6 +1993,9 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     searchField,
     placeSuggestions,
     searchPlaces,
+    atZones,
+    atZoneKey,
+    chooseATZones,
     setPriority,
     startPlaceSearch,
     choosePlaceSuggestion,

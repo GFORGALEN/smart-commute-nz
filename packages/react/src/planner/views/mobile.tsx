@@ -18,6 +18,7 @@ import { type RouteResult } from '@smart-commute/core';
 import { type MessageKey } from '@smart-commute/i18n';
 import { WeatherBar } from '../../WeatherBar';
 import { ModeIcon } from '../fields';
+import { canChooseATZones } from '../helpers';
 import { type MobilePage } from '../types';
 import { type PlannerModel } from '../usePlannerModel';
 import {
@@ -178,6 +179,34 @@ export const renderModeBar = (m: PlannerModel) => {
 
 // Two short lines: the route and its time, then when and what the price covers; price right. The source and
 // warnings are listed with the options below, so they only join here while the sheet is closed.
+// AT prices a trip by the zones it passes through, so a rider who knows the count gets the fare.
+export const renderZonePicker = (m: PlannerModel, result: RouteResult) => {
+  const { atZoneKey, atZones, chooseATZones, googleMode, t } = m;
+  const chosen = atZones[atZoneKey(result.id)];
+  if (!googleMode || (!chosen && !canChooseATZones(result.option))) return null;
+  return (
+    <div className="sc-zone-picker" role="group" aria-label={t('atZonesHelp')}>
+      <span className="sc-zone-picker-label">{t('atZonesLabel')}</span>
+      {[1, 2, 3, 4].map((zones) => (
+        <button
+          key={zones}
+          aria-pressed={chosen === zones}
+          onClick={() => chooseATZones(result.id, chosen === zones ? null : zones)}
+        >
+          {zones === 4 ? '4+' : zones}
+        </button>
+      ))}
+      <a
+        href="https://at.govt.nz/bus-train-ferry/fares-and-discounts/bus-and-train-fares"
+        target="_blank"
+        rel="noreferrer"
+      >
+        {t('atZoneMap')}
+      </a>
+    </div>
+  );
+};
+
 export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
   const {
     cardLabel,
@@ -194,7 +223,9 @@ export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
   } = m;
   const source = [
     resultSource(result),
-    result.totalCostRange ? t('fareRangeBadge') : '',
+    result.totalCostRange && result.totalCostRange.min !== result.totalCostRange.max
+      ? t('fareRangeBadge')
+      : '',
     result.warnings.includes('unverified-parking') ? t('parkingWarning') : '',
   ]
     .filter(Boolean)
@@ -219,6 +250,7 @@ export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
         <span>{tripScope}</span>
       </span>
       {(!sheetExpandable || !sheetOpen) && <span className="sc-sheet-source">{source}</span>}
+      {renderZonePicker(m, result)}
     </div>
   );
 };
@@ -341,7 +373,7 @@ export const renderSheet = (m: PlannerModel) => {
         </div>
       )}
       {googleMode && renderModeBar(m)}
-      <div className="sc-sheet-head">
+      <div className={`sc-sheet-head ${selected ? 'sc-sheet-head-selected' : ''}`}>
         {selected
           ? renderSelectedSummary(m, selected)
           : renderRouteStatus(m, 'sc-sheet-status-view')}

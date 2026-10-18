@@ -67,6 +67,11 @@ export interface GoogleRouteProviderOptions {
   trafficAware?: boolean;
   /** Opt in to a clearly labelled standard-adult AT range when Google omits a fare. */
   estimateMissingTransitFare?: boolean;
+  /**
+   * Whether to ask Google for a transit fare at all. Default true. With false, AT services are
+   * always priced from the AT tariff (with estimateMissingTransitFare) and no fare is requested.
+   */
+  useGoogleTransitFare?: boolean;
   /** Injectable SDK loader for deterministic tests without paid requests. */
   loadLibrary?: GoogleLibraryLoader;
   maxRouteRequests?: number;
@@ -1308,7 +1313,10 @@ export class GoogleRouteProvider implements RouteProvider {
         'INCOMPLETE_RESULT',
         'Google transit step durations exceed the route duration.',
       );
-    const amount = completeNZDFare(route.travelAdvisory);
+    const amount =
+      this.options.useGoogleTransitFare === false
+        ? undefined
+        : completeNZDFare(route.travelAdvisory);
     const firstTransit = legs.find((leg) => leg.mode === 'bus' || leg.mode === 'train');
     if (!firstTransit) return legs;
     if (nonnegative(amount)) {
@@ -1403,7 +1411,7 @@ export class GoogleRouteProvider implements RouteProvider {
       } else {
         // The JavaScript Route SDK accepts Route property names here. Its field
         // validation rejects the REST-style nested travelAdvisory.transitFare mask.
-        base.fields.push('travelAdvisory');
+        if (this.options.useGoogleTransitFare !== false) base.fields.push('travelAdvisory');
         base.transitPreference = { allowedTransitModes: ['BUS', 'RAIL'] };
       }
       if (waypoints.length)
