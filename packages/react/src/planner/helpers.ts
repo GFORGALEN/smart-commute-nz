@@ -88,3 +88,39 @@ export const withATZones = (option: JourneyOption, zones: number): JourneyOption
     );
   return { ...option, outbound: narrow(option.outbound), inbound: narrow(option.inbound) };
 };
+
+/**
+ * A Google Maps directions link for the planned trip, which phones open in the Google Maps app.
+ * A start that is "my current location" is left out, so Google Maps follows the live position;
+ * stops are passed only for driving, as Google Maps transit takes none.
+ */
+export const googleMapsDirectionsUrl = ({
+  origin,
+  destination,
+  mode,
+  waypoints = [],
+  currentLocationLabels = [],
+}: {
+  origin: Location;
+  destination: Location;
+  mode: 'drive' | 'transit';
+  waypoints?: Location[];
+  currentLocationLabels?: string[];
+}) => {
+  const place = (location: Location) =>
+    location.coordinates
+      ? `${location.coordinates.lat},${location.coordinates.lng}`
+      : location.label.trim();
+  const params = new URLSearchParams({ api: '1' });
+  const followsYou = !origin.label.trim() || currentLocationLabels.includes(origin.label);
+  if (!followsYou) {
+    params.set('origin', place(origin));
+    if (origin.placeId) params.set('origin_place_id', origin.placeId);
+  }
+  params.set('destination', place(destination));
+  if (destination.placeId) params.set('destination_place_id', destination.placeId);
+  params.set('travelmode', mode === 'drive' ? 'driving' : 'transit');
+  const stops = mode === 'drive' ? waypoints.filter((stop) => stop.label.trim()) : [];
+  if (stops.length) params.set('waypoints', stops.map(place).join('|'));
+  return `https://www.google.com/maps/dir/?${params}`;
+};

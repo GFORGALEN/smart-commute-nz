@@ -9,6 +9,7 @@ import {
   CloudSun,
   LocateFixed,
   MapPin,
+  Navigation,
   Plus,
   Route,
   Settings as SettingsIcon,
@@ -49,6 +50,7 @@ export const renderMapTop = (m: PlannerModel) => {
     beginMapDestinationPick,
     googleMode,
     googleStatus,
+    googleMapsUrl,
     hasDestination,
     locale,
     mobileTopRef,
@@ -110,6 +112,19 @@ export const renderMapTop = (m: PlannerModel) => {
           <CloudSun size={18} aria-hidden="true" />
           <span>{t('mobileWeather')}</span>
         </button>
+        {googleMapsUrl && (
+          <a
+            className="sc-map-tool"
+            href={googleMapsUrl}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={t('openInGoogleMaps')}
+            title={t('openInGoogleMaps')}
+          >
+            <Navigation size={18} aria-hidden="true" />
+            <span>{t('mobileNavigate')}</span>
+          </a>
+        )}
         {/* One tap between English and Chinese, named in the language it switches to. */}
         <button
           className="sc-map-tool sc-map-language"

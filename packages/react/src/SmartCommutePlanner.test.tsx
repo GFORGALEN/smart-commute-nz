@@ -2093,6 +2093,16 @@ describe('phone map-first layout', () => {
     expect(routeCard()).toHaveTextContent('one way');
   });
 
+  it('opens the planned trip in Google Maps from the map tools', () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    const link = screen.getByRole('link', { name: 'Open this trip in Google Maps' });
+    const params = new URL(link.getAttribute('href')!).searchParams;
+    expect(params.get('origin')).toBe('4 Fong Road, Auckland');
+    expect(params.get('destination')).toBe('Britomart, Auckland');
+    expect(params.get('travelmode')).toBe('driving');
+    expect(link).toHaveAttribute('target', '_blank');
+  });
+
   it('switches language from the map in one tap', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Switch to Chinese' }));

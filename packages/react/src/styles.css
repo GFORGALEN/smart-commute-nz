@@ -2672,8 +2672,8 @@ label.sc-route-measurements {
   border-color: var(--sc-accent);
   color: var(--sc-accent-text);
 }
-/* Phones keep the icons, so four tools fit one row; the names stay for screen readers. */
-@media (max-width: 439px) {
+/* Phones keep the icons, so all five tools fit one row; the names stay for screen readers. */
+@media (max-width: 539px) {
   .sc-map-tool {
     padding: 0;
   }

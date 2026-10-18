@@ -45,7 +45,14 @@ import {
   googleErrorKeys,
   historyLayer,
 } from './constants';
-import { cloneOption, hasGoogleProvenance, shortNumber, toLocation, withATZones } from './helpers';
+import {
+  cloneOption,
+  googleMapsDirectionsUrl,
+  hasGoogleProvenance,
+  shortNumber,
+  toLocation,
+  withATZones,
+} from './helpers';
 import {
   failedRouteOutcome,
   liveOptions,
@@ -73,6 +80,11 @@ import { useMediaQuery } from './useMediaQuery';
  * The planner's state, effects and handlers. The view modules read this model and hold no
  * state of their own, so the wide layout and the phone layout share one behaviour.
  */
+/** "My current location" in every language, so a start set in one survives a language switch. */
+const CURRENT_LOCATION_LABELS = (['en', 'zh-CN'] as const).map((locale) =>
+  createTranslator(locale)('currentLocation'),
+);
+
 export function usePlannerModel(props: SmartCommutePlannerProps) {
   const plannerId = useId();
   const [state, setState] = useState<PlannerState>(() => initialState(props));
@@ -1924,6 +1936,16 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     (result, index) => !googleMode || showAllRoutes || index < 3 || result.id === selected?.id,
   );
   const hasDestination = Boolean(state.destination.label.trim());
+  // Costs are worked out here; turn-by-turn navigation is one tap away in Google Maps.
+  const googleMapsUrl = hasDestination
+    ? googleMapsDirectionsUrl({
+        origin: state.origin,
+        destination: state.destination,
+        mode: googleMode ? liveMode : selected?.mode === 'drive' ? 'drive' : 'transit',
+        waypoints: drivingStops,
+        currentLocationLabels: CURRENT_LOCATION_LABELS,
+      })
+    : undefined;
   const routeConfirmBlocked =
     googleMode &&
     (googleStatus !== 'ready' ||
@@ -2047,6 +2069,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     searchField,
     placeSuggestions,
     searchPlaces,
+    googleMapsUrl,
     atZones,
     atZoneKey,
     chooseATZones,
