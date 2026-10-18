@@ -46,7 +46,6 @@ export const DATA_SOURCES: readonly DataSource[] = [
       'legs',
       'path',
       'warnings',
-      'travelAdvisory.transitFare',
       'legs.steps.transitDetails.stopCount',
       'legs.steps.transitDetails.transitLine',
     ],
@@ -60,7 +59,7 @@ export const DATA_SOURCES: readonly DataSource[] = [
     redistribution: 'restricted',
     limitations: [
       'Limited Auckland live checks on 2026-10-09 verified maps, driving, address search and geocoding; wider coverage remains unverified.',
-      'A complete Google NZD fare is preferred; the planner estimates an adult AT range for recognized AT bus/train services when fare data is incomplete. Other operators require manual pricing.',
+      'The planner requests no Google transit fare: recognized AT bus/train services are priced from the AT table and AT fare zone map. Other operators require manual pricing.',
       'Only transient session memory; no localStorage/API response caching.',
       'Draw Google routes on a Google map and preserve attribution.',
     ],
@@ -81,9 +80,8 @@ export const DATA_SOURCES: readonly DataSource[] = [
     redistribution: 'unverified',
     limitations: [
       'Effective 1 February 2026; snapshot requires refresh for February 2027.',
-      'Specific fare estimates require verified zones/overlap rules and eligibility. Automatic ranges are an adult tariff envelope, not stop-count or zone predictions.',
-      'Ranges exclude concession, subsidy and fare-cap history; unknown transfer eligibility widens the upper end.',
-      'No automatic fare-zone polygon intersection.',
+      'Zones are counted along each bus/train path on the AT fare zone map; without a path the fare is the adult 1-to-4+ zone envelope. Stop counts never stand in for zones.',
+      'Estimates exclude concession, subsidy and fare-cap history; unknown transfer eligibility widens the upper end.',
       'Ferries, group travel and monthly ferry pass interactions not implemented.',
     ],
   },
@@ -125,6 +123,26 @@ export const DATA_SOURCES: readonly DataSource[] = [
     limitations: [
       'Catalog metadata/search is not navigation routing.',
       'No verified parking tariffs, legality or availability dataset integrated.',
+    ],
+  },
+  {
+    id: 'at-fare-zones',
+    name: 'Auckland Transport Fare Zones (Open GIS)',
+    url: 'https://data-atgis.opendata.arcgis.com/datasets/3549d3cc98e7480abb77f436e05a7799',
+    service: 'FareZones feature layer, bundled as simplified polygons (about 2 m)',
+    fields: ['Name (zone, or both zones of an overlap area)', 'polygon'],
+    status: 'integrated',
+    verifiedOn: '2026-10-18',
+    sourceUpdatedOn: '2026-10-14',
+    updateFrequency:
+      'Static; AT loads zone changes by hand. Refresh with scripts/update-fare-zones.mjs',
+    license: 'CC BY 4.0, Auckland Transport',
+    authentication: 'None',
+    commercialUse: 'yes',
+    redistribution: 'yes',
+    limitations: [
+      'AT describes the layer for mapping and visualisation and its lineage as unclear; AT Journey Planner remains the check for a stop on a zone edge.',
+      'An overlap area counts as whichever neighbouring zone keeps the fare lowest; a train passing through City without a tag there is not charged for City.',
     ],
   },
   {

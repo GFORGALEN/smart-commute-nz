@@ -2016,6 +2016,34 @@ describe('phone map-first layout', () => {
     expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('$3.00–$7.90');
   });
 
+  it('preselects the zones counted on the AT map, and lets a rider override them', async () => {
+    const counted = rangedTransitResponse();
+    counted.routes[0]!.outbound[0]!.fareRange = {
+      ...counted.routes[0]!.outbound[0]!.fareRange,
+      min: 4.9,
+      max: 4.9,
+      mapZones: { count: 2, names: ['Isthmus', 'City'] },
+    } as never;
+    google.getRoutes.mockReset().mockResolvedValue(counted);
+    await renderLivePhone();
+    fireEvent.click(within(sheet()).getByRole('button', { name: 'Public transport' }));
+    const cost = await within(sheet()).findByTestId('selected-cost');
+    await waitFor(() => expect(cost).toHaveTextContent('Approx. $4.90'));
+    const zones = within(sheet()).getByRole('group', {
+      name: 'How many AT fare zones this trip passes through',
+    });
+    expect(within(zones).getByRole('button', { name: '2' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(within(sheet()).getByText('From AT’s zone map: Isthmus → City')).toBeVisible();
+    fireEvent.click(within(zones).getByRole('button', { name: '3' }));
+    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $6.50');
+    expect(within(sheet()).getByText('Your choice · AT’s zone map counts 2')).toBeVisible();
+    fireEvent.click(within(zones).getByRole('button', { name: '3' }));
+    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $4.90');
+  });
+
   it('switches language from the map in one tap', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Switch to Chinese' }));

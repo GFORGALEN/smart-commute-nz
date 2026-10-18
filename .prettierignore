@@ -6,3 +6,4 @@ test-results
 playwright-report
 docs/screenshots
 .claude
+packages/providers/src/data/at-fare-zones.json

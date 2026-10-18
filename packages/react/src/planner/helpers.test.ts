@@ -31,6 +31,17 @@ describe('AT zone pricing', () => {
     expect(priced.inbound[0]!.fareRange).toMatchObject({ min: 4.9, max: 4.9 });
   });
 
+  it('re-prices a fare counted on the AT zone map, keeping the count it was read from', () => {
+    const leg = bus(4.9, 4.9);
+    leg.fareRange!.mapZones = { count: 2, names: ['Isthmus', 'City'] };
+    const priced = withATZones(option([leg]), 3);
+    expect(priced.outbound[0]!.fareRange).toMatchObject({
+      min: 6.5,
+      max: 6.5,
+      mapZones: { count: 2 },
+    });
+  });
+
   it('leaves split journeys and CityLink alone, since one zone count cannot price them', () => {
     const split = option([bus(6, 15.8)]);
     expect(canChooseATZones(split)).toBe(false);

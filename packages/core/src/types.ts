@@ -19,6 +19,8 @@ export interface TransitFareRange extends CostRange {
   source: 'at-estimate';
   basis?: 'standard-adult' | 'citylink';
   assumptions?: string[];
+  /** Zones one journey was counted to travel through on AT's fare zone map, in route order. */
+  mapZones?: { count: number; names: string[] };
 }
 
 export interface TransitDetails {

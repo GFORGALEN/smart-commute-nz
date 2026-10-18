@@ -4,6 +4,7 @@ import type { JourneyOption, Location, TransitFareRange, TravelLeg } from '@smar
 import type { ProviderMetrics, RouteProvider, RouteRequest, RouteResult } from './types';
 import { RouteProviderError } from './types';
 import { AT_FARE_RULES } from './fares';
+import { countJourneyZones, loadATFareZones, type FareZoneMap } from './fare-zones';
 
 type LibraryName = 'maps' | 'core' | 'routes' | 'places' | 'geocoding';
 export type GoogleLibraryLoader = (name: LibraryName) => Promise<unknown>;
@@ -13,6 +14,8 @@ export interface GoogleRouteStep {
   distanceMeters?: number;
   staticDurationMillis?: number;
   travelMode?: string;
+  /** The step's line on the map; for a bus or train, where it runs from boarding to alighting. */
+  path?: { lat: number; lng: number }[];
   transitDetails?: {
     departureTime?: Date;
     arrivalTime?: Date;
@@ -292,7 +295,11 @@ function completeNZDFare(fare: GoogleRouteData['travelAdvisory']): number | unde
 }
 
 /** A tariff envelope, not a zone or stop-count prediction. */
-function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): TransitFareRange {
+function estimateATFare(
+  steps: GoogleRouteStep[],
+  departureTime?: Date,
+  zoneMap?: FareZoneMap,
+): TransitFareRange {
   const transitSteps = steps.filter((step) => step.travelMode === 'TRANSIT');
   if (!transitSteps.length || !transitSteps.every(isATService))
     throw new RouteProviderError(
@@ -329,6 +336,10 @@ function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): Transit
   const boardings = transitSteps.map((step) => ({
     departure: dateMillis(step.transitDetails?.departureTime),
     arrival: dateMillis(step.transitDetails?.arrivalTime),
+    ride: {
+      mode: modeOf(step) === 'train' ? ('train' as const) : ('bus' as const),
+      path: (step.path ?? []).map((point) => ({ lat: point.lat, lng: point.lng })),
+    },
     cityLink: [
       step.transitDetails?.transitLine?.name,
       step.transitDetails?.transitLine?.shortName,
@@ -365,25 +376,46 @@ function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): Transit
     }
     return journeys;
   };
+  // Zones a journey travels through, counted along its bus and train paths when AT's zone
+  // polygons are loaded; a journey without a usable path keeps the 1-to-4+ zone envelope.
+  const zonesOf = (group: typeof boardings) =>
+    zoneMap
+      ? countJourneyZones(
+          zoneMap,
+          group.map((boarding) => boarding.ride),
+        )
+      : undefined;
+  const zoneFare = (zones: number) =>
+    AT_FARE_RULES.adult[Math.min(zones, AT_FARE_RULES.adult.length) - 1]!;
   const price = (journeys: (typeof boardings)[], upper: boolean) =>
     Math.round(
-      journeys.reduce(
-        (sum, group) =>
-          sum +
-          (group.every((boarding) => boarding.cityLink)
-            ? AT_FARE_RULES.cityLink.adult
-            : upper
-              ? AT_FARE_RULES.adult.at(-1)!
-              : AT_FARE_RULES.adult[0]),
-        0,
-      ) * 100,
+      journeys.reduce((sum, group) => {
+        if (group.every((boarding) => boarding.cityLink)) return sum + AT_FARE_RULES.cityLink.adult;
+        const counted = zonesOf(group);
+        if (counted) return sum + zoneFare(counted.count);
+        return sum + (upper ? AT_FARE_RULES.adult.at(-1)! : AT_FARE_RULES.adult[0]);
+      }, 0) * 100,
     ) / 100;
   const minimumJourneys = groups(false);
   const maximumJourneys = groups(true);
   const cityLinkOnly = boardings.every((boarding) => boarding.cityLink);
+  const countedJourneys = maximumJourneys.map((group) =>
+    group.every((boarding) => boarding.cityLink) ? undefined : zonesOf(group),
+  );
+  const allCounted = maximumJourneys.every(
+    (group, index) =>
+      group.every((boarding) => boarding.cityLink) || countedJourneys[index] !== undefined,
+  );
+  // One journey whose zones are known can be shown, and re-priced, as a single zone count.
+  const single =
+    minimumJourneys.length === 1 && maximumJourneys.length === 1 && !cityLinkOnly
+      ? countedJourneys[0]
+      : undefined;
   const assumptions = [
     'Standard adult using the same AT HOP card or contactless card/device, with correct tag-on/tag-off. No concession, cap history or subsidy is applied.',
-    'Fare-zone coverage is unverified. Stop counts describe the route and do not determine fare zones.',
+    allCounted && zoneMap
+      ? `Fare zones counted along the route from Auckland Transport's fare zone map (${zoneMap.license}, edited ${zoneMap.sourceEditedOn}); an overlap area counts as the cheaper zone. Check the zone count in AT Journey Planner if a stop is on a zone edge.`
+      : 'Fare-zone coverage is unverified. Stop counts describe the route and do not determine fare zones.',
     `Published AT fare table verified ${AT_FARE_RULES.verifiedOn}: ${AT_FARE_RULES.sourceUrl}`,
   ];
   if (maximumJourneys.length > minimumJourneys.length)
@@ -404,6 +436,7 @@ function estimateATFare(steps: GoogleRouteStep[], departureTime?: Date): Transit
     source: 'at-estimate',
     basis: cityLinkOnly ? 'citylink' : 'standard-adult',
     assumptions,
+    ...(single ? { mapZones: { count: single.count, names: single.zones } } : {}),
   };
 }
 
@@ -502,6 +535,8 @@ export class GoogleRouteProvider implements RouteProvider {
   private overlayViewConstructor?: typeof google.maps.OverlayView;
   private waypointMarkers: google.maps.OverlayView[] = [];
   private userLocationMarker?: google.maps.OverlayView;
+  /** AT's fare zone polygons, loaded once a transit route needs an AT fare. */
+  private fareZones?: FareZoneMap;
   private polylines: google.maps.Polyline[] = [];
   /** Alternatives that select a route on click; muted while a map point is being picked. */
   private clickableRoutes: google.maps.Polyline[] = [];
@@ -1323,7 +1358,7 @@ export class GoogleRouteProvider implements RouteProvider {
       firstTransit.fare = amount;
       firstTransit.fareSource = 'google';
     } else if (this.options.estimateMissingTransitFare) {
-      firstTransit.fareRange = estimateATFare(steps, departureTime);
+      firstTransit.fareRange = estimateATFare(steps, departureTime, this.fareZones);
       firstTransit.fareSource = 'at-estimate';
     } else {
       throw new RouteProviderError(
@@ -1348,6 +1383,9 @@ export class GoogleRouteProvider implements RouteProvider {
     this.busy = true;
     try {
       this.computationWarnings = [];
+      // Zones are only counted for AT estimates; a missing zone file keeps the plain envelope.
+      if (request.mode === 'transit' && this.options.estimateMissingTransitFare)
+        this.fareZones ??= await loadATFareZones().catch(() => undefined);
       const origin = locationValue(request.origin);
       const destination = locationValue(request.destination);
       const waypoints = request.waypoints ?? [];

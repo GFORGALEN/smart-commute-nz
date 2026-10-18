@@ -2863,14 +2863,24 @@ label.sc-route-measurements {
   -webkit-line-clamp: 1;
   line-clamp: 1;
 }
-/* AT zones: one tap names the zone count; the fare follows the AT table. */
+/* AT zones: counted from AT's zone map, or set with one tap; the fare follows the AT table. */
+.sc-zone-picker-wrap {
+  grid-column: 1 / -1;
+  margin-top: var(--sc-space-1);
+}
 .sc-zone-picker {
   display: flex;
-  grid-column: 1 / -1;
   align-items: center;
   gap: var(--sc-space-1);
-  margin-top: var(--sc-space-1);
   font-size: var(--sc-fs-label);
+}
+.sc-zone-picker-note {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sc-zone-picker-label {
   margin-right: var(--sc-space-1);

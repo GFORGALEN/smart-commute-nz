@@ -18,7 +18,7 @@ import { type RouteResult } from '@smart-commute/core';
 import { type MessageKey } from '@smart-commute/i18n';
 import { WeatherBar } from '../../WeatherBar';
 import { ModeIcon } from '../fields';
-import { canChooseATZones } from '../helpers';
+import { canChooseATZones, mapZoneCount } from '../helpers';
 import { type MobilePage } from '../types';
 import { type PlannerModel } from '../usePlannerModel';
 import {
@@ -180,29 +180,47 @@ export const renderModeBar = (m: PlannerModel) => {
 // Two short lines: the route and its time, then when and what the price covers; price right. The source and
 // warnings are listed with the options below, so they only join here while the sheet is closed.
 // AT prices a trip by the zones it passes through, so a rider who knows the count gets the fare.
+// The zones are counted from AT's zone map when the route has a path; a tap overrides the count,
+// and tapping the counted or the chosen number again goes back to the map's count.
 export const renderZonePicker = (m: PlannerModel, result: RouteResult) => {
   const { atZoneKey, atZones, chooseATZones, googleMode, t } = m;
-  const chosen = atZones[atZoneKey(result.id)];
-  if (!googleMode || (!chosen && !canChooseATZones(result.option))) return null;
+  const override = atZones[atZoneKey(result.id)];
+  const counted = mapZoneCount(result.option);
+  if (!googleMode || (!override && !canChooseATZones(result.option))) return null;
+  const shown = override ?? (counted ? Math.min(counted.count, 4) : undefined);
   return (
-    <div className="sc-zone-picker" role="group" aria-label={t('atZonesHelp')}>
-      <span className="sc-zone-picker-label">{t('atZonesLabel')}</span>
-      {[1, 2, 3, 4].map((zones) => (
-        <button
-          key={zones}
-          aria-pressed={chosen === zones}
-          onClick={() => chooseATZones(result.id, chosen === zones ? null : zones)}
+    <div className="sc-zone-picker-wrap">
+      <div className="sc-zone-picker" role="group" aria-label={t('atZonesHelp')}>
+        <span className="sc-zone-picker-label">{t('atZonesLabel')}</span>
+        {[1, 2, 3, 4].map((zones) => (
+          <button
+            key={zones}
+            aria-pressed={shown === zones}
+            onClick={() =>
+              chooseATZones(
+                result.id,
+                zones === override || (!override && zones === shown) ? null : zones,
+              )
+            }
+          >
+            {zones === 4 ? '4+' : zones}
+          </button>
+        ))}
+        <a
+          href="https://at.govt.nz/bus-train-ferry/fares-and-discounts/bus-and-train-fares"
+          target="_blank"
+          rel="noreferrer"
         >
-          {zones === 4 ? '4+' : zones}
-        </button>
-      ))}
-      <a
-        href="https://at.govt.nz/bus-train-ferry/fares-and-discounts/bus-and-train-fares"
-        target="_blank"
-        rel="noreferrer"
-      >
-        {t('atZoneMap')}
-      </a>
+          {t('atZoneMap')}
+        </a>
+      </div>
+      {counted && (
+        <p className="sc-zone-picker-note">
+          {override && override !== Math.min(counted.count, 4)
+            ? t('atZonesOverridden', { count: counted.count })
+            : t('atZonesCounted', { zones: counted.names.join(' → ') })}
+        </p>
+      )}
     </div>
   );
 };

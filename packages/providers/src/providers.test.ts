@@ -744,6 +744,40 @@ describe('Google adapter without external paid requests', () => {
       });
     },
   );
+  it('prices an AT journey by the zones its path crosses on the AT zone map', async () => {
+    // Henderson to Britomart by train: Waitākere, Isthmus and City, as AT's own example says.
+    const western = {
+      ...atStep({
+        transitLine: {
+          name: 'Western Line',
+          vehicle: { vehicleType: 'HEAVY_RAIL' },
+          agencies: [{ name: 'Auckland Transport' }],
+        },
+      }),
+    };
+    western.path = [
+      { lat: -36.8812, lng: 174.631 },
+      { lat: -36.911, lng: 174.6527 },
+      { lat: -36.908, lng: 174.6855 },
+      { lat: -36.8856, lng: 174.7187 },
+      { lat: -36.8724, lng: 174.7444 },
+      { lat: -36.8668, lng: 174.7663 },
+      { lat: -36.8443, lng: 174.7678 },
+    ];
+    const { provider } = mockGoogle([[transitRoute([western])]], {
+      estimateMissingTransitFare: true,
+      useGoogleTransitFare: false,
+    });
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({
+      min: 6.5,
+      max: 6.5,
+      mapZones: { count: 3, names: ['Waitākere', 'Isthmus', 'City'] },
+    });
+    expect(result.routes[0]!.outbound[0]!.fareRange!.assumptions!.join(' ')).toContain(
+      "Auckland Transport's fare zone map",
+    );
+  });
   it('prices AT services from the AT tariff and asks Google for no fare when told not to', async () => {
     const route = transitRoute([atStep()]);
     route.travelAdvisory = { transitFare: { currencyCode: 'NZD', units: 4, nanos: 900000000 } };
