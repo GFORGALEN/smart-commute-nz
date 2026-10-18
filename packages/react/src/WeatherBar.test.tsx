@@ -1,5 +1,6 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { AUCKLAND_TIME_ZONE, formatZonedTime } from '@smart-commute/core';
 import { createWeatherFixture, WeatherService } from '@smart-commute/providers';
 import { SmartCommutePlanner } from './SmartCommutePlanner';
 import { useWeather } from './useWeather';
@@ -7,11 +8,8 @@ import { useWeather } from './useWeather';
 const props = { destination: 'Britomart, Auckland' };
 const weatherBar = () => screen.getByRole('region', { name: 'Weather' });
 const art = () => weatherBar().querySelector('.sc-weather-art') as HTMLElement;
-const localDateTime = (time: number) => {
-  const date = new Date(time);
-  const two = (value: number) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}T${two(date.getHours())}:${two(date.getMinutes())}`;
-};
+// The departure field holds Auckland time whatever the browser's zone, as on a UTC CI runner.
+const localDateTime = (time: number) => formatZonedTime(time, AUCKLAND_TIME_ZONE);
 
 beforeEach(() => localStorage.clear());
 
