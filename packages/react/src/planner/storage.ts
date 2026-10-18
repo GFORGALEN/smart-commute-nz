@@ -3,8 +3,6 @@ import {
   DEFAULT_OWNERSHIP,
   DEFAULT_SETTINGS,
   EXAMPLE_ORIGIN,
-  isExamplePlace,
-  type Location,
   type OwnershipCosts,
   compareOptions,
   createExampleOptions,
@@ -33,18 +31,6 @@ export const isFutureAucklandTime = (value: string | undefined, fold?: 'earlier'
 };
 export const isFold = (value: unknown): value is 'earlier' | 'later' =>
   value === 'earlier' || value === 'later';
-/** A trip restored from storage with both places is planned once when the map is ready. */
-export function hasSavedTrip(): boolean {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as {
-      origin?: Location;
-      destination?: Location;
-    } | null;
-    return Boolean(saved?.origin?.label?.trim() && saved.destination?.label?.trim());
-  } catch {
-    return false;
-  }
-}
 export function savedLiveMode(): LiveMode {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as {
@@ -145,10 +131,11 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     return {
       ...fallback,
       ...saved,
-      // Live planning never restores the sample start that an earlier version filled in.
+      // Live planning opens with empty search boxes, like a map app; only the offline
+      // calculator brings back the places it was last given.
       origin: props.origin
         ? toLocation(props.origin)
-        : props.googleApiKey && isExamplePlace(saved.origin)
+        : props.googleApiKey
           ? { label: '' }
           : saved.origin,
       destination: toLocation(props.destination),

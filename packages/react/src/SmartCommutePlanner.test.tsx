@@ -23,6 +23,10 @@ const google = vi.hoisted(() => ({
   beginWaypointSelection: vi.fn(),
   renderWaypointMarkers: vi.fn(),
   clearWaypointMarkers: vi.fn(),
+  showUserLocation: vi.fn(),
+  clearUserLocation: vi.fn(),
+  suggest: vi.fn(),
+  select: vi.fn(),
   getPlaceHours: vi.fn(),
 }));
 vi.mock('@smart-commute/providers', async (importOriginal) => ({
@@ -40,6 +44,9 @@ vi.mock('@smart-commute/providers', async (importOriginal) => ({
     beginWaypointSelection = google.beginWaypointSelection;
     renderWaypointMarkers = google.renderWaypointMarkers;
     clearWaypointMarkers = google.clearWaypointMarkers;
+    showUserLocation = google.showUserLocation;
+    createPlaceSearch = () => ({ suggest: google.suggest, select: google.select });
+    clearUserLocation = google.clearUserLocation;
     getPlaceHours = google.getPlaceHours;
     getMetrics = () => ({ routeRequests: 1 });
   },
@@ -622,30 +629,36 @@ describe('optional Google provider safeguards', () => {
     });
   });
 
-  it('drops the untouched sample start saved by an earlier version, but keeps a chosen one', async () => {
+  it('opens live search empty, like a map app, whatever places were saved', async () => {
     const saved = (origin: { label: string; coordinates?: { lat: number; lng: number } }) =>
       localStorage.setItem(
         'smart-commute-nz:v1',
         JSON.stringify({
           origin,
-          destination: { label: '' },
+          destination: { label: 'ha' },
           settings: DEFAULT_SETTINGS,
           options: createExampleOptions(),
           leaveNow: true,
           timesVersion: 2,
         }),
       );
-    saved({ label: '4 Fong Road, Auckland' });
+    // Half-typed text from a past visit and a located start alike are left behind.
+    saved({ label: '4' });
     const { unmount } = render(
       <SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />,
     );
     expect(await screen.findByLabelText('Starting point', { exact: true })).toHaveValue('');
+    expect(screen.getByLabelText('Destination', { exact: true })).toHaveValue('');
     unmount();
     saved({ label: '4 Fong Road, Auckland', coordinates: { lat: -36.95, lng: 174.93 } });
     render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
-    expect(await screen.findByLabelText('Starting point', { exact: true })).toHaveValue(
-      '4 Fong Road, Auckland',
-    );
+    expect(await screen.findByLabelText('Starting point', { exact: true })).toHaveValue('');
+    fireEvent.change(screen.getByLabelText('Starting point', { exact: true }), {
+      target: { value: '4 Fo' },
+    });
+    expect(
+      (JSON.parse(localStorage.getItem('smart-commute-nz:v1')!) as { origin: Location }).origin,
+    ).toEqual({ label: '' });
   });
 
   it('initializes one map and one pair of address widgets in StrictMode, including a tab return', async () => {
@@ -813,13 +826,19 @@ describe('optional Google provider safeguards', () => {
         departure: later,
       }),
     );
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
+    render(
+      <SmartCommutePlanner
+        {...defaultProps}
+        origin="12 Queen Street, Auckland"
+        googleApiKey="restricted-test-key"
+      />,
+    );
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
     // The saved time is kept as written but not guessed to be an Auckland time.
     expect(screen.getByLabelText('Departure time', { exact: true })).toHaveValue(later);
     expect(screen.getByRole('button', { name: 'These are Auckland times' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Plan route' })).toBeDisabled();
-    // A saved trip is restored but not planned while its times are unconfirmed.
+    // Nothing is planned while the saved times are unconfirmed.
     expect(google.getRoutes).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'These are Auckland times' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Plan route' })).toBeEnabled());
@@ -1886,7 +1905,8 @@ describe('phone map-first layout', () => {
       within(tools)
         .getAllByRole('button')
         .map((button) => button.textContent),
-    ).toEqual(['Settings', 'Locate', 'Weather']);
+    ).toEqual(['Settings', 'Weather']);
+    expect(screen.getByRole('button', { name: 'Show my location' })).toBeVisible();
     expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.95');
     expect(screen.getByTestId('cost-transit')).toHaveTextContent('13.00');
 
@@ -1939,6 +1959,40 @@ describe('phone map-first layout', () => {
       expect(within(routePage()).getByLabelText('Destination', { exact: true })).toBeVisible(),
     );
     expect(routePage()).toBeInTheDocument();
+  });
+
+  it('lists Google suggestions under the field with the map in view, and keeps the name', async () => {
+    const suggestion = {
+      id: 'sky',
+      main: 'Sky Tower',
+      secondary: 'Victoria Street West, Auckland CBD, Auckland',
+      text: 'Sky Tower, Victoria Street West, Auckland CBD, Auckland',
+    };
+    google.suggest.mockResolvedValue([suggestion]);
+    google.select.mockResolvedValue({
+      label: 'Sky Tower, Victoria Street West, Auckland CBD, Auckland 1010, New Zealand',
+      coordinates: { lat: -36.8485, lng: 174.7622 },
+    });
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    // One tap on the empty route card is already searching the destination.
+    fireEvent.click(routeCard());
+    const field = within(routePage()).getByLabelText('Destination', { exact: true });
+    expect(field).toHaveFocus();
+    expect(routePage()).toHaveAttribute('data-searching', 'destination');
+    fireEvent.change(field, { target: { value: 'Sky T' } });
+    const choice = await within(routePage()).findByRole('button', { name: /^Sky Tower/ });
+    expect(google.suggest).toHaveBeenCalledWith('Sky T');
+    expect(google.attachAutocomplete).not.toHaveBeenCalled();
+    expect(within(routePage()).getByText('Suggestions powered by Google')).toBeVisible();
+    fireEvent.click(choice);
+    await waitFor(() =>
+      expect(within(routePage()).getByLabelText('Destination', { exact: true })).toHaveValue(
+        'Sky Tower, Victoria Street West, Auckland CBD, Auckland 1010, New Zealand',
+      ),
+    );
+    expect(routePage()).not.toHaveAttribute('data-searching');
+    expect(window.history.state).toMatchObject({ smartCommuteLayer: 1 });
   });
 
   it('closes stacked pages one at a time with the system back button', async () => {
@@ -2035,7 +2089,7 @@ describe('phone map-first layout', () => {
     expect(google.getRoutes).toHaveBeenCalledTimes(2);
   });
 
-  it('plans a saved trip once when the map is ready, without repeating', async () => {
+  it('plans nothing on opening, even when a trip was saved', async () => {
     localStorage.setItem(
       'smart-commute-nz:v1',
       JSON.stringify({
@@ -2047,13 +2101,39 @@ describe('phone map-first layout', () => {
         timesVersion: 2,
       }),
     );
-    render(<SmartCommutePlanner {...defaultProps} googleApiKey="restricted-test-key" />);
-    expect(await screen.findByTestId('route-card-google-drive-test')).toBeInTheDocument();
-    expect(google.getRoutes).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    act(() => window.history.back());
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    expect(routeCard()).toHaveTextContent('Where are you going?');
+    expect(google.getRoutes).not.toHaveBeenCalled();
+  });
+
+  it('locates the phone from the map, fills an empty start once and explains a refusal', async () => {
+    const position = { coords: { latitude: -36.85, longitude: 174.76, accuracy: 20 } };
+    const getCurrentPosition = vi.fn((success: (value: typeof position) => void) =>
+      success(position),
+    );
+    vi.stubGlobal('navigator', { ...navigator, geolocation: { getCurrentPosition } });
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Show my location' }));
+    expect(google.showUserLocation).toHaveBeenCalledWith({ lat: -36.85, lng: 174.76 }, 20);
+    expect(await screen.findByText('Start set to your current location')).toBeVisible();
+    fireEvent.click(routeCard());
+    expect(within(routePage()).getByLabelText('Starting point', { exact: true })).toHaveValue(
+      'My current location',
+    );
+    // The empty route card opened straight into destination search: two layers to close.
+    act(() => window.history.go(-2));
     await noPageOpen();
-    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+
+    getCurrentPosition.mockImplementation(((
+      _success: unknown,
+      failure: (error: { code: number; PERMISSION_DENIED: number }) => void,
+    ) => failure({ code: 1, PERMISSION_DENIED: 1 })) as never);
+    fireEvent.click(screen.getByRole('button', { name: 'Show my location' }));
+    expect(await within(sheet()).findByRole('alert')).toHaveTextContent(
+      'Location is blocked for this site',
+    );
   });
 
   it('keeps a found outbound route when no return exists at the chosen time', async () => {

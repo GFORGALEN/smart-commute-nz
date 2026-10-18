@@ -49,20 +49,22 @@ export const renderMapTop = (m: PlannerModel) => {
     googleMode,
     googleStatus,
     hasDestination,
-    locationLoading,
     mobileTopRef,
     openPage,
     setWeatherOpen,
     shortPlace,
+    startPlaceSearch,
     state,
     t,
     tripSummary,
-    useLocation,
     weatherOpen,
   } = m;
   return (
     <div className="sc-mobile-top" ref={mobileTopRef}>
-      <button className="sc-route-card" onClick={() => openPage('route')}>
+      <button
+        className="sc-route-card"
+        onClick={() => (hasDestination ? openPage('route') : startPlaceSearch('destination'))}
+      >
         <span className="sc-visually-hidden">{t('mobileEditRoute')}: </span>
         <span className="sc-route-card-text">
           {hasDestination ? (
@@ -85,15 +87,6 @@ export const renderMapTop = (m: PlannerModel) => {
         <button className="sc-map-tool" onClick={() => openPage('settings')}>
           <SettingsIcon size={18} aria-hidden="true" />
           <span>{t('settings')}</span>
-        </button>
-        <button
-          className="sc-map-tool"
-          onClick={useLocation}
-          disabled={locationLoading}
-          title={t('useLocation')}
-        >
-          <LocateFixed size={18} aria-hidden="true" />
-          <span>{t(locationLoading ? 'locating' : 'mobileLocate')}</span>
         </button>
         {googleMode && (
           <button
@@ -129,6 +122,26 @@ export const renderPickBar = (m: PlannerModel) => {
         {t(mapDestinationPicking ? 'cancelDestinationPick' : 'cancelStopoverPick')}
       </button>
     </div>
+  );
+};
+
+// Like a map app, the locate button sits at the map's lower right, clear of Google's terms.
+export const renderLocateButton = (m: PlannerModel) => {
+  const { locationLoading, showMyLocation, t } = m;
+  return (
+    <button
+      className="sc-map-locate"
+      onClick={showMyLocation}
+      disabled={locationLoading}
+      aria-label={t(locationLoading ? 'locating' : 'mobileShowMyLocation')}
+      title={t('mobileShowMyLocation')}
+    >
+      {locationLoading ? (
+        <span className="sc-spinner" aria-hidden="true" />
+      ) : (
+        <LocateFixed size={22} aria-hidden="true" />
+      )}
+    </button>
   );
 };
 
@@ -330,7 +343,7 @@ export const renderSheet = (m: PlannerModel) => {
           {renderBanners(m)}
           {locationError && (
             <p role="alert" className="sc-error">
-              {t('locationFailed')}
+              {t(locationError)}
             </p>
           )}
           {sheetCards.length > 0 && (
@@ -407,23 +420,21 @@ export const renderSheet = (m: PlannerModel) => {
   );
 };
 
-// Route page: two compact place rows over the map; searching a place takes the whole page.
+// Route page: two compact place rows over the map; searching a place keeps the map in view.
 export const renderPlaceRow = (m: PlannerModel, field: 'origin' | 'destination') => {
   const {
-    addressSearchEnabled,
-    addressSearchPending,
     destinationMissing,
-    destinationSearchRef,
     googleMode,
     originMissing,
-    originSearchRef,
     searchField,
+    searchPlaces,
     setSearchField,
     setState,
     state,
     t,
   } = m;
   const missing = field === 'origin' ? originMissing : destinationMissing;
+  const label = state[field].label;
   return (
     <div
       className={`sc-place-row ${missing ? 'sc-field-invalid' : ''}`}
@@ -436,23 +447,33 @@ export const renderPlaceRow = (m: PlannerModel, field: 'origin' | 'destination')
         className={`sc-route-dot ${field === 'destination' ? 'sc-route-dot-end' : ''}`}
         aria-hidden="true"
       />
-      {googleMode ? (
-        <div className="sc-place-input sc-live-address">
-          <div ref={field === 'origin' ? originSearchRef : destinationSearchRef} />
-          {!addressSearchEnabled && (
-            <small>{addressSearchPending ? t('googleLoading') : state[field].label}</small>
-          )}
-        </div>
-      ) : (
-        <input
-          className="sc-place-input"
-          aria-label={t(field)}
-          placeholder={t(field)}
-          value={state[field].label}
-          onChange={(event) =>
-            setState((current) => ({ ...current, [field]: { label: event.target.value } }))
-          }
-        />
+      {/* A plain field on phones: Google's own widget would cover the map with a full page. */}
+      <input
+        className="sc-place-input"
+        aria-label={t(field)}
+        placeholder={t(field === 'origin' ? 'mobileSearchStart' : 'mobileWhereTo')}
+        value={label}
+        autoComplete="off"
+        enterKeyHint="search"
+        onChange={(event) =>
+          googleMode
+            ? searchPlaces(field, event.target.value)
+            : setState((current) => ({ ...current, [field]: { label: event.target.value } }))
+        }
+      />
+      {searchField === field && label && (
+        <button
+          className="sc-icon-button sc-place-clear"
+          aria-label={t('mobileClearSearch')}
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={(event) => {
+            if (googleMode) searchPlaces(field, '');
+            else setState((current) => ({ ...current, [field]: { label: '' } }));
+            event.currentTarget.parentElement?.querySelector('input')?.focus();
+          }}
+        >
+          <X size={18} />
+        </button>
       )}
     </div>
   );
@@ -462,15 +483,37 @@ export const renderSearchActions = (m: PlannerModel, field: 'origin' | 'destinat
   const {
     applyPlace,
     beginMapDestinationPick,
+    choosePlaceSuggestion,
     googleMode,
     googleStatus,
     locationLoading,
+    placeSuggestions,
     state,
     t,
     useLocation,
   } = m;
+  const suggestions =
+    googleMode && placeSuggestions?.field === field && state[field].label.trim()
+      ? placeSuggestions.items
+      : [];
   return (
     <ul className="sc-search-actions">
+      {suggestions.map((suggestion) => (
+        <li key={suggestion.id}>
+          <button onClick={() => choosePlaceSuggestion(field, suggestion)}>
+            <MapPin size={18} aria-hidden="true" />
+            <span>
+              {suggestion.main}
+              {suggestion.secondary && <small>{suggestion.secondary}</small>}
+            </span>
+          </button>
+        </li>
+      ))}
+      {suggestions.length > 0 && (
+        <li className="sc-search-attribution">
+          <span>{t('poweredByGoogle')}</span>
+        </li>
+      )}
       {field === 'origin' && (
         <li>
           <button onClick={useLocation} disabled={locationLoading}>
@@ -579,6 +622,7 @@ export const renderSchedulePanel = (m: PlannerModel) => {
 export const renderRoutePage = (m: PlannerModel) => {
   const {
     drivingStops,
+    goBack,
     googleError,
     googleMode,
     locationError,
@@ -653,7 +697,7 @@ export const renderRoutePage = (m: PlannerModel) => {
             )}
             {locationError && (
               <p role="alert" className="sc-error">
-                {t('locationFailed')}
+                {t(locationError)}
               </p>
             )}
             {googleMode && googleError && (
@@ -664,7 +708,12 @@ export const renderRoutePage = (m: PlannerModel) => {
           </>
         )}
       </div>
-      {!searchField && <div className="sc-route-map-gap" aria-hidden="true" />}
+      {/* The map stays in view below the search; tapping it ends the search, as in a map app. */}
+      <div
+        className="sc-route-map-gap"
+        aria-hidden="true"
+        onClick={searchField ? goBack : undefined}
+      />
       {schedulePanelOpen && !searchField && renderSchedulePanel(m)}
     </>
   );
@@ -905,6 +954,7 @@ export const renderMobileShell = (m: PlannerModel) => {
         <div className="sc-mobile-map">
           {renderSchematic(m, true)}
           {pickingActive ? renderPickBar(m) : renderMapTop(m)}
+          {!pickingActive && !routeEditing && renderLocateButton(m)}
           {weatherOpen && !pickingActive && (
             <div className="sc-mobile-weather">
               <WeatherBar

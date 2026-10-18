@@ -378,7 +378,7 @@ export const renderLocationSection = (m: PlannerModel) => {
       </div>
       {locationError && (
         <p role="alert" className="sc-error">
-          {t('locationFailed')}
+          {t(locationError)}
         </p>
       )}
       {(!googleMode || !googleResponse) && (

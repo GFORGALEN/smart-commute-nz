@@ -100,6 +100,22 @@ export interface MapDisplayOptions {
 /** Callable cleanup retains compatibility with integrations that only dispose it. */
 export type GoogleAutocompleteControl = (() => void) & { setValue(value: string): void };
 
+/** One address suggestion for a planner that draws its own list. */
+export interface PlaceSuggestion {
+  id: string;
+  main: string;
+  secondary: string;
+  text: string;
+}
+/**
+ * Address search without Google's widget, which takes over the whole screen on phones. One
+ * session token covers the typing and the chosen place's details, as the widget does.
+ */
+export interface GooglePlaceSearch {
+  suggest(input: string): Promise<PlaceSuggestion[]>;
+  select(suggestion: PlaceSuggestion): Promise<Location>;
+}
+
 let configuredKey: string | undefined;
 type MapsAuthenticationWindow = Window & { gm_authFailure?: () => void };
 const authenticationListeners = new Set<() => void>();
@@ -480,6 +496,7 @@ export class GoogleRouteProvider implements RouteProvider {
   private waypointSelectionCleanup?: () => void;
   private overlayViewConstructor?: typeof google.maps.OverlayView;
   private waypointMarkers: google.maps.OverlayView[] = [];
+  private userLocationMarker?: google.maps.OverlayView;
   private polylines: google.maps.Polyline[] = [];
   /** Alternatives that select a route on click; muted while a map point is being picked. */
   private clickableRoutes: google.maps.Polyline[] = [];
@@ -542,6 +559,7 @@ export class GoogleRouteProvider implements RouteProvider {
   ): Promise<void> {
     this.waypointSelectionCleanup?.();
     this.clearWaypointMarkers();
+    this.clearUserLocation();
     this.mapLifecycleCleanup?.();
     let ready = false;
     let failed = false;
@@ -625,6 +643,72 @@ export class GoogleRouteProvider implements RouteProvider {
       }
       throw readable;
     }
+  }
+
+  createPlaceSearch(): GooglePlaceSearch {
+    let token: google.maps.places.AutocompleteSessionToken | undefined;
+    const predictions = new Map<string, google.maps.places.PlacePrediction>();
+    return {
+      suggest: async (input) => {
+        if (!input.trim()) return [];
+        const places = (await this.load('places')) as google.maps.PlacesLibrary;
+        token ??= new places.AutocompleteSessionToken();
+        try {
+          const { suggestions } = await places.AutocompleteSuggestion.fetchAutocompleteSuggestions({
+            input,
+            includedRegionCodes: ['nz'],
+            sessionToken: token,
+          });
+          predictions.clear();
+          return suggestions.flatMap(({ placePrediction }) => {
+            if (!placePrediction) return [];
+            predictions.set(placePrediction.placeId, placePrediction);
+            return [
+              {
+                id: placePrediction.placeId,
+                main: placePrediction.mainText?.text ?? placePrediction.text.text,
+                secondary: placePrediction.secondaryText?.text ?? '',
+                text: placePrediction.text.text,
+              },
+            ];
+          });
+        } catch (error) {
+          throw readableError(error);
+        }
+      },
+      select: async (suggestion) => {
+        const prediction = predictions.get(suggestion.id);
+        if (!prediction)
+          throw new RouteProviderError('INVALID_INPUT', 'Search for the address again.');
+        // The details request ends this session; the next keystroke starts another.
+        token = undefined;
+        predictions.clear();
+        try {
+          const place = prediction.toPlace();
+          this.metrics.placeDetailsRequests += 1;
+          // These fields use Place Details Essentials; displayName would escalate to Pro.
+          await place.fetchFields({ fields: ['formattedAddress', 'location'] });
+          if (!place.location)
+            throw new RouteProviderError(
+              'INCOMPLETE_RESULT',
+              'The selected address has no coordinates. Enter latitude and longitude manually.',
+            );
+          // A landmark's address alone ("Victoria Street West, …") loses its name.
+          const address = place.formattedAddress;
+          return {
+            label: !address
+              ? suggestion.text
+              : address.startsWith(suggestion.main)
+                ? address
+                : `${suggestion.main}, ${address}`,
+            coordinates: place.location.toJSON(),
+            ...(place.id ? { placeId: place.id } : {}),
+          };
+        } catch (error) {
+          throw readableError(error);
+        }
+      },
+    };
   }
 
   async attachAutocomplete(
@@ -804,6 +888,48 @@ export class GoogleRouteProvider implements RouteProvider {
     });
     this.waypointSelectionCleanup = cleanup;
     return cleanup;
+  }
+
+  /** A blue dot for the browser's position, with the map centred on it; nothing is requested. */
+  showUserLocation(point: LatLngPoint, accuracyMeters?: number): void {
+    this.clearUserLocation();
+    const map = this.map;
+    const OverlayView = this.overlayViewConstructor;
+    if (!map || !OverlayView) return;
+    const marker = new OverlayView();
+    const element = document.createElement('span');
+    element.className = 'sc-map-user-location';
+    element.setAttribute('aria-hidden', 'true');
+    Object.assign(element.style, {
+      position: 'absolute',
+      transform: 'translate(-50%, -50%)',
+      boxSizing: 'border-box',
+      width: '20px',
+      height: '20px',
+      borderRadius: '50%',
+      border: '3px solid #ffffff',
+      background: '#1a73e8',
+      boxShadow: '0 0 0 8px rgb(26 115 232 / 0.2), 0 1px 4px rgb(0 0 0 / 0.35)',
+      pointerEvents: 'none',
+    });
+    marker.onAdd = () => marker.getPanes()?.floatPane.appendChild(element);
+    marker.draw = () => {
+      const position = marker.getProjection()?.fromLatLngToDivPixel(point);
+      if (!position) return;
+      element.style.left = `${position.x}px`;
+      element.style.top = `${position.y}px`;
+    };
+    marker.onRemove = () => element.remove();
+    marker.setMap(map);
+    this.userLocationMarker = marker;
+    map.panTo?.(point);
+    // A rough fix is shown at street scale; a precise one closer in.
+    map.setZoom?.(accuracyMeters !== undefined && accuracyMeters > 500 ? 13 : 15);
+  }
+
+  clearUserLocation(): void {
+    this.userLocationMarker?.setMap(null);
+    this.userLocationMarker = undefined;
   }
 
   clearWaypointMarkers(): void {
@@ -1075,6 +1201,7 @@ export class GoogleRouteProvider implements RouteProvider {
     this.mapLifecycleCleanup?.();
     this.mapLifecycleCleanup = undefined;
     this.clearMapRoutes();
+    this.clearUserLocation();
     this.sdkRoutes.clear();
     this.routeResponse.clear();
     this.responseOrder = [];

@@ -2681,6 +2681,25 @@ label.sc-route-measurements {
     white-space: nowrap;
   }
 }
+/* A round locate button at the map's lower right, above Google's terms line. */
+.sc-map-locate {
+  position: absolute;
+  right: var(--sc-space-3);
+  bottom: 28px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--sc-line);
+  border-radius: 50%;
+  background: var(--sc-surface);
+  box-shadow: var(--sc-float-shadow);
+  color: var(--sc-accent-text);
+}
+.sc-map-locate:disabled {
+  color: var(--sc-muted);
+}
 .sc-mobile-weather {
   position: absolute;
   top: calc(env(safe-area-inset-top) + 132px);
@@ -3057,7 +3076,7 @@ label.sc-route-measurements {
   flex: none;
 }
 
-/* Route page: compact places over the map; searching a place takes the whole page. */
+/* Route page: compact places over the map; searching a place keeps the map in view below. */
 .sc-page[data-page='route'] {
   background: transparent;
 }
@@ -3066,12 +3085,6 @@ label.sc-route-measurements {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-}
-.sc-page[data-page='route'][data-searching] {
-  background: var(--sc-surface);
-}
-.sc-page[data-page='route'][data-searching] .sc-page-body {
-  overflow-y: auto;
 }
 .sc-page-bar-actions {
   display: flex;
@@ -3094,10 +3107,10 @@ label.sc-route-measurements {
   max-height: 70%;
   overflow-y: auto;
 }
+/* Search is a card at the top; Google's suggestions open over the map beneath it. */
 .sc-route-panel[data-searching] {
-  max-height: none;
-  border-bottom: 0;
-  box-shadow: none;
+  max-height: 62%;
+  border-radius: 0 0 16px 16px;
 }
 .sc-place-rows {
   position: relative;
@@ -3172,6 +3185,19 @@ input.sc-place-input {
   color: var(--sc-muted);
   font-size: var(--sc-fs-caption);
 }
+.sc-search-actions li.sc-search-attribution {
+  border-top: 0;
+  padding: var(--sc-space-1) 0 var(--sc-space-2);
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+  text-align: right;
+}
+.sc-place-row > .sc-place-clear {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin-left: calc(var(--sc-space-2) * -1);
+}
 .sc-route-panel .sc-stopovers {
   margin: 0;
 }
@@ -3191,6 +3217,9 @@ input.sc-place-input {
   flex: 1;
   min-height: 0;
   pointer-events: none;
+}
+.sc-page[data-searching] .sc-route-map-gap {
+  pointer-events: auto;
 }
 .sc-route-footer .sc-trip-button {
   flex: 1;

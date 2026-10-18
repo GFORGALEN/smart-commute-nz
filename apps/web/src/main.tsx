@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { EXAMPLE_DESTINATION, isExamplePlace } from '@smart-commute/core';
+import { EXAMPLE_DESTINATION } from '@smart-commute/core';
 import { SmartCommutePlanner } from '@smart-commute/react';
 import { createWeatherFixture, type WeatherFixtureKind } from '@smart-commute/providers';
 import './styles.css';
@@ -27,8 +27,9 @@ function savedAppearance(): { locale?: 'en' | 'zh-CN'; theme?: 'light' | 'dark' 
 }
 const appearance = savedAppearance();
 const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || undefined;
+// Only the offline calculator reopens at its last destination; live search starts empty.
 function savedDestination(): string | undefined {
-  if (embedded) return undefined;
+  if (embedded || googleApiKey) return undefined;
   try {
     const saved: unknown = JSON.parse(localStorage.getItem('smart-commute-nz:v1') || 'null');
     if (saved && typeof saved === 'object' && 'destination' in saved) {
@@ -37,9 +38,7 @@ function savedDestination(): string | undefined {
         destination &&
         typeof destination === 'object' &&
         'label' in destination &&
-        typeof destination.label === 'string' &&
-        // Live planning starts empty rather than at the sample destination saved earlier.
-        !(googleApiKey && isExamplePlace(destination as { label: string }))
+        typeof destination.label === 'string'
       )
         return destination.label;
     }

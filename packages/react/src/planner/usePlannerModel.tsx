@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Bus, Car, Route, TrainFront } from 'lucide-react';
 import {
   analyseCarPurchase,
@@ -23,6 +24,8 @@ import {
   AT_FARE_RULES,
   fareSnapshotDaysLeft,
   GoogleRouteProvider,
+  type GooglePlaceSearch,
+  type PlaceSuggestion,
   type PlaceHours,
   type RouteResult as ProviderRouteResult,
   RouteProviderError,
@@ -51,7 +54,7 @@ import {
   RouteRequestQueue,
   statusForQuery,
 } from './routeRequests';
-import { hasSavedTrip, initialState, savedLiveMode } from './storage';
+import { initialState, savedLiveMode } from './storage';
 import {
   type Direction,
   type LiveMode,
@@ -72,6 +75,9 @@ import { useMediaQuery } from './useMediaQuery';
 export function usePlannerModel(props: SmartCommutePlannerProps) {
   const plannerId = useId();
   const [state, setState] = useState<PlannerState>(() => initialState(props));
+  // Read by callbacks that finish after a render, such as a position fix.
+  const originLabelRef = useRef(state.origin.label);
+  originLabelRef.current = state.origin.label;
   const [locale, setLocale] = useState<Locale>(props.locale ?? 'en');
   const [theme, setTheme] = useState<'light' | 'dark'>(props.theme ?? 'light');
   const [screen, setScreen] = useState<Screen>('planner');
@@ -85,6 +91,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const [weatherOpen, setWeatherOpen] = useState(false);
   // Route page sub-states: searching one place, the time panel, and its stops or more panel.
   const [searchField, setSearchField] = useState<'origin' | 'destination' | null>(null);
+  const searchFieldRef = useRef(searchField);
+  searchFieldRef.current = searchField;
   const [schedulePanelOpen, setSchedulePanelOpen] = useState(false);
   const [routePanel, setRoutePanel] = useState<'stops' | 'more' | null>(null);
   const mobileTopRef = useRef<HTMLDivElement>(null);
@@ -99,7 +107,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const [selectedId, setSelectedId] = useState('drive');
   const [notice, setNotice] = useState('');
   const [locationLoading, setLocationLoading] = useState(false);
-  const [locationError, setLocationError] = useState(false);
+  const [locationError, setLocationError] = useState<MessageKey | null>(null);
   const [waypointDraft, setWaypointDraft] = useState('');
   const [stopoverSearchOpen, setStopoverSearchOpen] = useState(false);
   const [stopoverDraft, setStopoverDraft] = useState<Location>({ label: '' });
@@ -126,6 +134,16 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const [googleResponse, setGoogleResponse] = useState<ProviderRouteResult | null>(null);
   const [addressSearchEnabled, setAddressSearchEnabled] = useState(false);
   const [addressSearchPending, setAddressSearchPending] = useState(false);
+  const [placeSuggestions, setPlaceSuggestions] = useState<{
+    field: 'origin' | 'destination';
+    items: PlaceSuggestion[];
+  } | null>(null);
+  const placeSearchRef = useRef<{
+    provider: GoogleRouteProvider;
+    search: GooglePlaceSearch;
+  } | null>(null);
+  const suggestTimer = useRef<number | undefined>(undefined);
+  const suggestRequest = useRef(0);
   const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine);
   // AT verification is session-only: no Google Places content enters new storage
   // metadata, and restored AT-derived amounts require explicit re-verification.
@@ -147,8 +165,6 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const autocompletePending = useRef(false);
   const requestQueue = useRef(new RouteRequestQueue());
   const routeCache = useRef(new RouteCache());
-  const restorePending = useRef<boolean | null>(null);
-  if (restorePending.current === null) restorePending.current = hasSavedTrip();
   const mapLoadPending = useRef(false);
   const mapReadyProvider = useRef<GoogleRouteProvider | null>(null);
   const resetProvider = useRef<GoogleRouteProvider | null>(null);
@@ -532,8 +548,10 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     if (comparison.error && !comparison.missingPlaces) return;
     try {
       const manualOptions = state.options.filter((option) => !hasGoogleProvenance(option));
+      // Live search text, often half typed, is never saved: the boxes reopen empty.
       for (const direction of ['origin', 'destination'] as const) {
-        if (!googlePlaceSignatures.current.has(JSON.stringify(state[direction])))
+        if (props.googleApiKey) manualLocations.current[direction] = { label: '' };
+        else if (!googlePlaceSignatures.current.has(JSON.stringify(state[direction])))
           manualLocations.current[direction] = state[direction];
       }
       localStorage.setItem(
@@ -577,6 +595,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     departureEntry.instant,
     returnEntry.instant,
     liveMode,
+    props.googleApiKey,
   ]);
   useEffect(() => {
     if (!notice) return;
@@ -733,31 +752,51 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     }));
     setNotice(t('savedPlaceAdded'));
   };
-  const useLocation = () => {
-    setLocationError(false);
+  /**
+   * Reads the browser's position once. "Use my location" always makes it the start; the map's
+   * locate button only fills an empty start, and both centre the live map on a blue dot.
+   */
+  const locate = (setStart: 'always' | 'if-empty') => {
+    setLocationError(null);
+    if (typeof window !== 'undefined' && window.isSecureContext === false) {
+      setLocationError('locationInsecure');
+      setSheetOpen(true);
+      return;
+    }
     if (!navigator.geolocation) {
-      setLocationError(true);
+      setLocationError('locationFailed');
+      setSheetOpen(true);
       return;
     }
     setLocationLoading(true);
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        setState((current) => ({
-          ...current,
-          origin: {
-            label: `${t('currentLocation')} (${position.coords.latitude.toFixed(5)}, ${position.coords.longitude.toFixed(5)})`,
-            coordinates: { lat: position.coords.latitude, lng: position.coords.longitude },
-          },
-        }));
         setLocationLoading(false);
+        const coordinates = { lat: position.coords.latitude, lng: position.coords.longitude };
+        if (googleMode && googleStatus === 'ready')
+          provider.showUserLocation(coordinates, position.coords.accuracy);
+        const fromSearch = searchFieldRef.current === 'origin';
+        const startSet = setStart === 'always' || !originLabelRef.current.trim();
+        if (startSet)
+          setState((current) => ({
+            ...current,
+            origin: { label: t('currentLocation'), coordinates },
+          }));
+        if (fromSearch) setSearchField(null);
+        else if (setStart === 'if-empty' && startSet) setNotice(t('locationSetAsStart'));
       },
-      () => {
+      (error) => {
         setLocationLoading(false);
-        setLocationError(true);
+        setLocationError(
+          error.code === error.PERMISSION_DENIED ? 'locationDenied' : 'locationFailed',
+        );
+        setSheetOpen(true);
       },
-      { timeout: 10000, maximumAge: 60000 },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
     );
   };
+  const useLocation = () => locate('always');
+  const showMyLocation = () => locate('if-empty');
   const addDrivingRoute = () => {
     const first = state.options.find(
       (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
@@ -918,6 +957,11 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     }
   };
   const enableAddressSearch = async () => {
+    // Phones draw their own suggestions (below), so only the stop search uses Google's widget.
+    if (isMobile) {
+      if (googleMode) setAddressSearchEnabled(true);
+      return;
+    }
     if (
       !googleMode ||
       autocompletePending.current ||
@@ -991,6 +1035,61 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
         setAddressSearchPending(false);
       }
     }
+  };
+  /**
+   * Phone address search: the typed text stays in the field, Google's suggestions are listed
+   * under it in the top card, and the map stays in view. Choosing one closes the search at once
+   * and fills in the coordinates when they arrive.
+   */
+  const placeSearch = (): GooglePlaceSearch => {
+    if (placeSearchRef.current?.provider !== provider)
+      placeSearchRef.current = { provider, search: provider.createPlaceSearch() };
+    return placeSearchRef.current.search;
+  };
+  const searchPlaces = (field: 'origin' | 'destination', query: string) => {
+    setState((current) => ({ ...current, [field]: { label: query } }));
+    window.clearTimeout(suggestTimer.current);
+    const request = ++suggestRequest.current;
+    if (!googleMode || query.trim().length < 2) {
+      setPlaceSuggestions(null);
+      return;
+    }
+    suggestTimer.current = window.setTimeout(() => {
+      void placeSearch()
+        .suggest(query)
+        .then((items) => {
+          if (mounted.current && request === suggestRequest.current)
+            setPlaceSuggestions({ field, items });
+        })
+        .catch((error: unknown) => {
+          if (mounted.current && request === suggestRequest.current)
+            setGoogleError(describeGoogleError(error));
+        });
+    }, 250);
+  };
+  const choosePlaceSuggestion = (field: 'origin' | 'destination', suggestion: PlaceSuggestion) => {
+    window.clearTimeout(suggestTimer.current);
+    const request = ++suggestRequest.current;
+    setPlaceSuggestions(null);
+    // Closing the search drops its history entry through the layer sync below.
+    setState((current) => ({ ...current, [field]: { label: suggestion.text } }));
+    setSearchField(null);
+    setAddressResolving((count) => count + 1);
+    void placeSearch()
+      .select(suggestion)
+      .then((location) => {
+        if (!mounted.current || request !== suggestRequest.current) return;
+        googlePlaceSignatures.current.add(JSON.stringify(location));
+        setState((current) =>
+          current[field].label === suggestion.text ? { ...current, [field]: location } : current,
+        );
+      })
+      .catch((error: unknown) => {
+        if (mounted.current) setGoogleError(describeGoogleError(error));
+      })
+      .finally(() => {
+        if (mounted.current) setAddressResolving((count) => Math.max(0, count - 1));
+      });
   };
   const showLiveResponse = (
     response: ProviderRouteResult,
@@ -1117,10 +1216,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   }, [planIntent]);
   useEffect(() => {
     if (!googleMode || googleStatus !== 'ready') return;
-    // A choice made while the map loaded, or a saved trip restored on opening, plans once.
-    const next =
-      requestQueue.current.take() ?? (restorePending.current ? liveModeRef.current : null);
-    restorePending.current = false;
+    // A choice made while the map loaded plans once.
+    const next = requestQueue.current.take();
     if (next) void routeAction.current(next);
   }, [googleMode, googleStatus]);
   useEffect(() => {
@@ -1629,6 +1726,16 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     pageFocus.current = 'page';
     setPages([...pages, page]);
   };
+  /** Opens the route page already searching one place, keyboard up, like a map app. */
+  const startPlaceSearch = (field: 'origin' | 'destination') => {
+    flushSync(() => {
+      openPage('route');
+      setSearchField(field);
+    });
+    pageStackRef.current
+      ?.querySelector<HTMLInputElement>(`.sc-place-row[data-field='${field}'] input`)
+      ?.focus();
+  };
   const restoreRouteDraft = (draft: RouteDraft) => {
     if (draft.fingerprint !== liveQueryFingerprint) restoredFingerprint.current = draft.fingerprint;
     setState((current) => ({
@@ -1801,8 +1908,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     Boolean(props.googleApiKey && !googleMode);
   const applyPlace = (field: 'origin' | 'destination', place: Location) => {
     setState((current) => ({ ...current, [field]: place }));
+    // Closing the search drops its history entry through the layer sync.
     setSearchField(null);
-    if (historyDepth.current > 0) window.history.back();
   };
   const pageTitles: Record<MobilePage, MessageKey> = {
     route: 'mobileEditRoute',
@@ -1844,6 +1951,10 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     weatherOpen,
     setWeatherOpen,
     searchField,
+    placeSuggestions,
+    searchPlaces,
+    startPlaceSearch,
+    choosePlaceSuggestion,
     setSearchField,
     schedulePanelOpen,
     setSchedulePanelOpen,
@@ -1939,6 +2050,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     selectResult,
     savePlace,
     useLocation,
+    showMyLocation,
     addDrivingRoute,
     addWaypoint,
     appendDrivingStop,
