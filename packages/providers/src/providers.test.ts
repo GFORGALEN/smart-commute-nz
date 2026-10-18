@@ -745,20 +745,29 @@ describe('Google adapter without external paid requests', () => {
     },
   );
   it('prices outbound and return fare ranges independently without doubling one fare response', async () => {
-    const inbound = transitRoute([atStep()]);
-    inbound.travelAdvisory = { transitFare: { currencyCode: 'NZD', units: 4, nanos: 900000000 } };
-    const { provider } = mockGoogle([[transitRoute([atStep()])], [inbound]], {
-      estimateMissingTransitFare: true,
-    });
-    const result = await provider.getRoutes({
-      ...request,
-      mode: 'transit',
-      roundTrip: true,
-      returnTime: nzWeekday,
-    });
-    expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({ min: 3, max: 7.9 });
-    expect(result.routes[0]!.inbound[0]).toMatchObject({ fare: 4.9, fareSource: 'google' });
-    expect(result.requestCount).toBe(2);
+    // Google accepts transit times only a week back, so the fixed return needs a fixed today.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-08T12:00:00+13:00'));
+    try {
+      const inbound = transitRoute([atStep()]);
+      inbound.travelAdvisory = {
+        transitFare: { currencyCode: 'NZD', units: 4, nanos: 900000000 },
+      };
+      const { provider } = mockGoogle([[transitRoute([atStep()])], [inbound]], {
+        estimateMissingTransitFare: true,
+      });
+      const result = await provider.getRoutes({
+        ...request,
+        mode: 'transit',
+        roundTrip: true,
+        returnTime: nzWeekday,
+      });
+      expect(result.routes[0]!.outbound[0]!.fareRange).toMatchObject({ min: 3, max: 7.9 });
+      expect(result.routes[0]!.inbound[0]).toMatchObject({ fare: 4.9, fareSource: 'google' });
+      expect(result.requestCount).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
   it.each(['first', 'subsequent'] as const)(
     'rejects the expired snapshot when the %s actual boarding crosses midnight into the review date',
