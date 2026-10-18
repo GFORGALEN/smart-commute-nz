@@ -61,6 +61,7 @@ import {
   type MobilePage,
   type PlannerState,
   type RouteDraft,
+  type RoutePriority,
   type RouteStatus,
   type Screen,
   type SmartCommutePlannerProps,
@@ -125,7 +126,9 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const summaryRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLElement>(null);
   const [showAllRoutes, setShowAllRoutes] = useState(false);
-  const [sortBy, setSortBy] = useState<CardSort>('cost');
+  const [sortBy, setSortBy] = useState<CardSort>(() =>
+    state.priority === 'time' ? 'time' : 'cost',
+  );
   const [manualRequested, setManualRequested] = useState(false);
   // The map's own lifecycle; route requests have their own status.
   const [googleStatus, setGoogleStatus] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
@@ -287,9 +290,18 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     comparison.staleFareOptions.length || comparison.pendingFareOptions.length
       ? 'noComparableRoutes'
       : 'noCompleteRoutes';
+  // Until someone picks a route, the one that best meets the chosen priority is selected.
+  const priorityPick =
+    state.priority === 'time' ? comparison.result?.fastest : comparison.result?.cheapest;
   const selected =
     comparison.result?.results.find((result) => result.id === selectedId) ??
+    priorityPick ??
     comparison.result?.results[0];
+  const setPriority = (priority: RoutePriority) => {
+    setState((current) => ({ ...current, priority }));
+    setSortBy(priority === 'time' ? 'time' : 'cost');
+    setSelectedId('');
+  };
   const hasFareRanges = Boolean(comparison.result?.results.some((result) => result.totalCostRange));
   const cardResults = orderCards(comparison.result?.results ?? [], sortBy);
   const fareExplanationKey = (option: JourneyOption) => {
@@ -753,10 +765,10 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     setNotice(t('savedPlaceAdded'));
   };
   /**
-   * Reads the browser's position once. "Use my location" always makes it the start; the map's
-   * locate button only fills an empty start, and both centre the live map on a blue dot.
+   * Reads the browser's position once. "Use my location" always fills the place being searched;
+   * the map's locate button only fills an empty start, and both centre the map on a blue dot.
    */
-  const locate = (setStart: 'always' | 'if-empty') => {
+  const locate = (field: 'origin' | 'destination', setStart: 'always' | 'if-empty') => {
     setLocationError(null);
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       setLocationError('locationInsecure');
@@ -775,12 +787,12 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
         const coordinates = { lat: position.coords.latitude, lng: position.coords.longitude };
         if (googleMode && googleStatus === 'ready')
           provider.showUserLocation(coordinates, position.coords.accuracy);
-        const fromSearch = searchFieldRef.current === 'origin';
+        const fromSearch = searchFieldRef.current === field;
         const startSet = setStart === 'always' || !originLabelRef.current.trim();
         if (startSet)
           setState((current) => ({
             ...current,
-            origin: { label: t('currentLocation'), coordinates },
+            [field]: { label: t('currentLocation'), coordinates },
           }));
         if (fromSearch) setSearchField(null);
         else if (setStart === 'if-empty' && startSet) setNotice(t('locationSetAsStart'));
@@ -795,8 +807,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
     );
   };
-  const useLocation = () => locate('always');
-  const showMyLocation = () => locate('if-empty');
+  const useLocation = (field: 'origin' | 'destination' = 'origin') => locate(field, 'always');
+  const showMyLocation = () => locate('origin', 'if-empty');
   const addDrivingRoute = () => {
     const first = state.options.find(
       (option) => option.mode === 'drive' && !hasGoogleProvenance(option),
@@ -1108,8 +1120,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
         ),
       ],
     }));
-    const first = response.routes[0]?.id;
-    if (first) setSelectedId(selectedRoute ?? first);
+    // A fresh response selects by priority; a cached one keeps the route picked before.
+    setSelectedId(selectedRoute ?? '');
     setRouteStatus({ state: response.routes.length ? 'success' : 'no-routes', key, mode });
   };
   const restoreCached = (key: string) => {
@@ -1821,6 +1833,14 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     }
   }, [layerDepth]);
   useEffect(() => {
+    // Closing a search drops the phone keyboard, and iOS may leave the page scrolled where the
+    // keyboard pushed it; the next tap would only scroll it back, so reset it here.
+    if (!isMobile || searchField) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLInputElement && active.closest('.sc-place-row')) active.blur();
+    if (window.scrollY || window.scrollX) window.scrollTo(0, 0);
+  }, [isMobile, searchField, routeEditing]);
+  useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
       const layer = historyLayer(event.state);
       const current = historyDepth.current;
@@ -1953,6 +1973,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     searchField,
     placeSuggestions,
     searchPlaces,
+    setPriority,
     startPlaceSearch,
     choosePlaceSuggestion,
     setSearchField,

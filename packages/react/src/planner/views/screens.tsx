@@ -19,6 +19,7 @@ export const renderSettings = (m: PlannerModel) => {
     props,
     setLocale,
     setNotice,
+    setPriority,
     setSelectedId,
     setState,
     setTheme,
@@ -35,6 +36,22 @@ export const renderSettings = (m: PlannerModel) => {
         <p>{t('settingsDescription')}</p>
       </div>
       <div className="sc-settings-grid">
+        <div className="sc-surface">
+          <h2>{t('priorityHeading')}</h2>
+          <div className="sc-appearance-buttons" role="group" aria-label={t('priorityHeading')}>
+            {(['cost', 'time'] as const).map((priority) => (
+              <button
+                key={priority}
+                aria-pressed={(state.priority ?? 'cost') === priority}
+                className={(state.priority ?? 'cost') === priority ? 'is-active' : ''}
+                onClick={() => setPriority(priority)}
+              >
+                {t(priority === 'cost' ? 'priorityCost' : 'priorityTime')}
+              </button>
+            ))}
+          </div>
+          <p className="sc-help">{t('priorityHelp')}</p>
+        </div>
         <div className="sc-surface">
           <h2>{t('carParameters')}</h2>
           {renderCarFields(m)}

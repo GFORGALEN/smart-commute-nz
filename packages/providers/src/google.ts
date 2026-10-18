@@ -1089,7 +1089,8 @@ export class GoogleRouteProvider implements RouteProvider {
       whiteSpace: 'nowrap',
       boxShadow: '0 1px 4px rgb(0 0 0 / 0.22)',
       cursor: route.selected ? 'default' : 'pointer',
-      zIndex: route.selected ? '2' : '1',
+      // The chosen route's time and price sit above the start and finish labels (zIndex 3).
+      zIndex: route.selected ? '4' : '1',
     });
     element.addEventListener('click', (event) => {
       event.stopPropagation();
@@ -1152,6 +1153,10 @@ export class GoogleRouteProvider implements RouteProvider {
         border: '1px solid #1b5e3f',
         font: '600 12px/1.3 system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif',
         whiteSpace: 'nowrap',
+        // Long place names stay short so they cover less of the map and of the route chips.
+        maxWidth: '150px',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
         boxShadow: '0 1px 4px rgb(0 0 0 / 0.22)',
       });
       element.appendChild(text);

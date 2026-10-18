@@ -163,6 +163,7 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
       ...restoreTimes(saved),
       ownership: restoreOwnership(saved.ownership),
       applyFareCap: typeof saved.applyFareCap === 'boolean' ? saved.applyFareCap : true,
+      priority: saved.priority === 'time' ? 'time' : 'cost',
     };
   } catch {
     return fallback;

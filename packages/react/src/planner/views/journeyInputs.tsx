@@ -361,7 +361,7 @@ export const renderLocationSection = (m: PlannerModel) => {
         </button>
       </div>
       <div className="sc-location-actions">
-        <button className="sc-text-button" onClick={useLocation} disabled={locationLoading}>
+        <button className="sc-text-button" onClick={() => useLocation()} disabled={locationLoading}>
           <LocateFixed size={15} />
           {t(locationLoading ? 'locating' : 'useLocation')}
         </button>

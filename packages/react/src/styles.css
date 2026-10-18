@@ -2667,8 +2667,8 @@ label.sc-route-measurements {
   border-color: var(--sc-accent);
   color: var(--sc-accent-text);
 }
-/* Narrow phones keep the icons; the names stay for screen readers. */
-@media (max-width: 399px) {
+/* Phones keep the icons, so four tools fit one row; the names stay for screen readers. */
+@media (max-width: 439px) {
   .sc-map-tool {
     padding: 0;
   }
@@ -2747,7 +2747,7 @@ label.sc-route-measurements {
   display: grid;
   flex: none;
   place-items: center;
-  height: 22px;
+  height: 16px;
   cursor: grab;
   touch-action: none;
 }
@@ -2760,9 +2760,9 @@ label.sc-route-measurements {
 .sc-sheet-head {
   display: flex;
   flex: none;
-  align-items: flex-start;
-  gap: var(--sc-space-2);
-  padding: 0 var(--sc-space-2) var(--sc-space-3) var(--sc-gutter);
+  align-items: center;
+  gap: var(--sc-space-1);
+  padding: 0 var(--sc-space-1) var(--sc-space-2) var(--sc-gutter);
 }
 .sc-sheet-head:first-child {
   padding-top: var(--sc-space-4);
@@ -2800,6 +2800,17 @@ label.sc-route-measurements {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.sc-sheet-name > strong {
+  flex: none;
+  color: var(--sc-text);
+  font-weight: 650;
+}
+.sc-sheet-name > strong::before {
+  content: '·';
+  margin-right: 6px;
+  color: var(--sc-muted);
+  font-weight: 400;
+}
 .sc-sheet-cost {
   grid-column: 2;
   grid-row: 1 / span 2;
@@ -2825,8 +2836,8 @@ label.sc-route-measurements {
   font-size: var(--sc-fs-label);
   font-variant-numeric: tabular-nums;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
 }
 .sc-sheet-source {
   grid-column: 1 / -1;
@@ -2918,9 +2929,54 @@ label.sc-route-measurements {
   width: auto;
   height: 36px;
 }
+/* Phone option: name and price on one line, time and distance under it, tags small below. */
 .sc-sheet-card {
-  align-items: start;
-  min-height: 56px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 1px var(--sc-space-3);
+  width: 100%;
+  min-height: 52px;
+  padding: var(--sc-space-2) var(--sc-space-3) var(--sc-space-2) var(--sc-space-4);
+  border-left: 3px solid transparent;
+  color: var(--sc-text);
+  text-align: left;
+}
+.sc-option.is-selected .sc-sheet-card {
+  border-left-color: var(--sc-accent-mark);
+}
+.sc-sheet-card:focus-visible {
+  outline-offset: -3px;
+}
+.sc-sheet-card-name {
+  overflow: hidden;
+  font-weight: 650;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sc-sheet-card .sc-money {
+  font-size: var(--sc-fs-body);
+}
+.sc-sheet-card-meta {
+  grid-column: 1 / -1;
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
+  font-variant-numeric: tabular-nums;
+}
+.sc-sheet-card-meta strong {
+  color: var(--sc-text);
+  font-weight: 650;
+}
+.sc-sheet-card-extra {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 0 var(--sc-space-3);
+  font-size: var(--sc-fs-caption);
+}
+.sc-sheet-card-extra .sc-result-tags {
+  gap: 0 var(--sc-space-2);
 }
 .sc-sheet-actions {
   display: flex;
@@ -3034,7 +3090,7 @@ label.sc-route-measurements {
   flex: none;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--sc-space-2);
-  padding: 0 var(--sc-gutter) var(--sc-space-3);
+  padding: 0 var(--sc-gutter) var(--sc-space-2);
 }
 .sc-sheet-grip + .sc-mode-bar {
   padding-top: 0;
@@ -3047,7 +3103,7 @@ label.sc-route-measurements {
   align-items: center;
   justify-content: center;
   gap: var(--sc-space-2);
-  min-height: 44px;
+  min-height: 40px;
   border: 1px solid var(--sc-line-strong);
   border-radius: var(--sc-radius-sm);
   background: var(--sc-surface);

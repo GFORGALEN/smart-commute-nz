@@ -49,8 +49,10 @@ export const renderMapTop = (m: PlannerModel) => {
     googleMode,
     googleStatus,
     hasDestination,
+    locale,
     mobileTopRef,
     openPage,
+    setLocale,
     setWeatherOpen,
     shortPlace,
     startPlaceSearch,
@@ -106,6 +108,15 @@ export const renderMapTop = (m: PlannerModel) => {
         >
           <CloudSun size={18} aria-hidden="true" />
           <span>{t('mobileWeather')}</span>
+        </button>
+        {/* One tap between English and Chinese, named in the language it switches to. */}
+        <button
+          className="sc-map-tool sc-map-language"
+          lang={locale === 'zh-CN' ? 'en' : 'zh-CN'}
+          aria-label={t('switchLanguage')}
+          onClick={() => setLocale(locale === 'zh-CN' ? 'en' : 'zh-CN')}
+        >
+          {locale === 'zh-CN' ? 'EN' : '中文'}
         </button>
       </div>
     </div>
@@ -165,7 +176,7 @@ export const renderModeBar = (m: PlannerModel) => {
   );
 };
 
-// Two lines: what was chosen and how long on the left, the price on the right. The source and
+// Two short lines: the route and its time, then when and what the price covers; price right. The source and
 // warnings are listed with the options below, so they only join here while the sheet is closed.
 export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
   const {
@@ -193,6 +204,7 @@ export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
       <span className="sc-sheet-name">
         <ModeIcon mode={result.mode} size={16} />
         <span>{cardLabel(result)}</span>
+        <strong>{wholeMinutes(result.totalMinutes)}</strong>
       </span>
       <strong
         key={valueUpdates}
@@ -201,11 +213,9 @@ export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
       >
         {moneyWithRange(result.totalCost, result.totalCostRange)}
       </strong>
-      <span className="sc-sheet-meta">
-        {wholeMinutes(result.totalMinutes)}
+      <span className="sc-sheet-meta" title={tripScope}>
         {departureAt !== undefined &&
-          ` · ${clockSpan(departureAt, result.breakdown.outbound.totalMinutes)}`}
-        {' · '}
+          `${clockSpan(departureAt, result.breakdown.outbound.totalMinutes)} · `}
         <span>{tripScope}</span>
       </span>
       {(!sheetExpandable || !sheetOpen) && <span className="sc-sheet-source">{source}</span>}
@@ -233,33 +243,38 @@ export const renderSheetCards = (m: PlannerModel) => {
         const isSelected = selected?.id === result.id;
         return (
           <li key={result.id} className={`sc-option ${isSelected ? 'is-selected' : ''}`}>
+            {/* Compact: name and price, then time first. Transfers only matter off the road. */}
             <button
-              className="sc-result-card sc-sheet-card"
+              className="sc-sheet-card"
               onClick={() => selectResult(result)}
               aria-pressed={isSelected}
               data-testid={`route-card-${result.id}`}
             >
-              <span className="sc-result-radio" aria-hidden="true" />
-              <span className="sc-result-main">
-                <span className="sc-result-name">{label}</span>
-                <span className="sc-result-meta">
-                  {[
-                    wholeMinutes(result.totalMinutes),
-                    distanceText(result),
-                    t('transferCount', { count: result.transfers }),
-                  ].join(' · ')}
-                </span>
-                {!sharedSheetSource && (
-                  <span className="sc-result-source">{resultSource(result)}</span>
-                )}
-                {tags.length > 0 && <span className="sc-result-tags">{tags}</span>}
-              </span>
+              <span className="sc-sheet-card-name">{label}</span>
               <span
                 className={`sc-money ${result.totalCostRange ? 'sc-money-range' : ''}`}
                 data-testid={`cost-${result.id}`}
               >
                 {moneyWithRange(result.totalCost, result.totalCostRange)}
               </span>
+              <span className="sc-sheet-card-meta">
+                <strong>{wholeMinutes(result.totalMinutes)}</strong>
+                {[
+                  distanceText(result),
+                  result.mode === 'drive' ? '' : t('transferCount', { count: result.transfers }),
+                ]
+                  .filter(Boolean)
+                  .map((part) => ` · ${part}`)
+                  .join('')}
+              </span>
+              {(tags.length > 0 || !sharedSheetSource) && (
+                <span className="sc-sheet-card-extra">
+                  {tags.length > 0 && <span className="sc-result-tags">{tags}</span>}
+                  {!sharedSheetSource && (
+                    <span className="sc-result-source">{resultSource(result)}</span>
+                  )}
+                </span>
+              )}
             </button>
           </li>
         );
@@ -518,14 +533,12 @@ export const renderSearchActions = (m: PlannerModel, field: 'origin' | 'destinat
           <span>{t('poweredByGoogle')}</span>
         </li>
       )}
-      {field === 'origin' && (
-        <li>
-          <button onClick={useLocation} disabled={locationLoading}>
-            <LocateFixed size={18} aria-hidden="true" />
-            {t(locationLoading ? 'locating' : 'useLocation')}
-          </button>
-        </li>
-      )}
+      <li>
+        <button onClick={() => useLocation(field)} disabled={locationLoading}>
+          <LocateFixed size={18} aria-hidden="true" />
+          {t(locationLoading ? 'locating' : 'useLocation')}
+        </button>
+      </li>
       {field === 'destination' && googleMode && (
         <li>
           <button onClick={beginMapDestinationPick} disabled={googleStatus !== 'ready'}>

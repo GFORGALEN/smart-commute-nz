@@ -54,7 +54,10 @@ export interface PlannerState {
   ownership: OwnershipCosts;
   /** Whether public transport in that comparison stops at the AT HOP 7-day cap. */
   applyFareCap: boolean;
+  /** What a new set of routes is sorted and chosen by: the lowest price or the shortest time. */
+  priority?: RoutePriority;
 }
+export type RoutePriority = 'cost' | 'time';
 export type LiveMode = 'drive' | 'transit';
 /** A route request's lifecycle, kept apart from the map's own loading state. */
 export type RouteStatus =

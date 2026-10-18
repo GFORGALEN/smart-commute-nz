@@ -1905,7 +1905,7 @@ describe('phone map-first layout', () => {
       within(tools)
         .getAllByRole('button')
         .map((button) => button.textContent),
-    ).toEqual(['Settings', 'Weather']);
+    ).toEqual(['Settings', 'Weather', '中文']);
     expect(screen.getByRole('button', { name: 'Show my location' })).toBeVisible();
     expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.95');
     expect(screen.getByTestId('cost-transit')).toHaveTextContent('13.00');
@@ -1993,6 +1993,51 @@ describe('phone map-first layout', () => {
     );
     expect(routePage()).not.toHaveAttribute('data-searching');
     expect(window.history.state).toMatchObject({ smartCommuteLayer: 1 });
+  });
+
+  it('switches language from the map in one tap', () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to Chinese' }));
+    expect(screen.getByRole('button', { name: '切换到英文' })).toHaveTextContent('EN');
+    expect(screen.getByRole('group', { name: '地图工具' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '切换到英文' }));
+    expect(screen.getByRole('button', { name: 'Switch to Chinese' })).toBeVisible();
+  });
+
+  it('chooses and sorts routes by the priority set in settings', async () => {
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Lowest price' }));
+    act(() => window.history.back());
+    await noPageOpen();
+    expect(screen.getByTestId('selected-cost')).toHaveTextContent('13.00');
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Shortest time' }));
+    act(() => window.history.back());
+    await noPageOpen();
+    const cards = within(sheet()).getAllByTestId(/^route-card-/);
+    expect(cards[0]).toHaveAttribute('aria-pressed', 'true');
+    expect(within(sheet()).getByRole('combobox', { name: 'Sort by' })).toHaveValue('time');
+  });
+
+  it('offers the current location for the destination too', async () => {
+    const position = { coords: { latitude: -36.85, longitude: 174.76, accuracy: 20 } };
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      geolocation: {
+        getCurrentPosition: (success: (value: typeof position) => void) => success(position),
+      },
+    });
+    render(<SmartCommutePlanner {...defaultProps} />);
+    fireEvent.click(routeCard());
+    fireEvent.focus(within(routePage()).getByLabelText('Destination', { exact: true }));
+    fireEvent.click(within(routePage()).getByRole('button', { name: 'Use my location' }));
+    await waitFor(() =>
+      expect(within(routePage()).getByLabelText('Destination', { exact: true })).toHaveValue(
+        'My current location',
+      ),
+    );
+    expect(within(routePage()).getByLabelText('Starting point', { exact: true })).toBeVisible();
   });
 
   it('closes stacked pages one at a time with the system back button', async () => {
