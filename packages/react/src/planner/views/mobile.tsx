@@ -353,6 +353,7 @@ export const renderSheet = (m: PlannerModel) => {
     comparison,
     estimatedReturn,
     googleMode,
+    hasDestination,
     hasFareRanges,
     locationError,
     openPage,
@@ -372,6 +373,9 @@ export const renderSheet = (m: PlannerModel) => {
     sortBy,
     t,
   } = m;
+  // The opening screen is the map and "Where are you going?" alone, as in Google Maps; the
+  // sheet appears with a destination, or only to carry a notice such as a location problem.
+  const opening = googleMode && !hasDestination;
   return (
     <section className="sc-sheet" aria-label={t('mobileSheetLabel')}>
       {sheetExpandable && (
@@ -405,23 +409,25 @@ export const renderSheet = (m: PlannerModel) => {
           <span />
         </div>
       )}
-      {googleMode && renderModeBar(m)}
-      <div className={`sc-sheet-head ${selected ? 'sc-sheet-head-selected' : ''}`}>
-        {selected
-          ? renderSelectedSummary(m, selected)
-          : renderRouteStatus(m, 'sc-sheet-status-view')}
-        {sheetExpandable && (
-          <button
-            className="sc-icon-button sc-sheet-toggle"
-            aria-expanded={sheetOpen}
-            aria-controls={sheetBodyId}
-            aria-label={t(sheetOpen ? 'mobileCollapseSheet' : 'mobileExpandSheet')}
-            onClick={() => setSheetOpen((open) => !open)}
-          >
-            <ChevronDown size={20} />
-          </button>
-        )}
-      </div>
+      {!opening && googleMode && renderModeBar(m)}
+      {!opening && (
+        <div className={`sc-sheet-head ${selected ? 'sc-sheet-head-selected' : ''}`}>
+          {selected
+            ? renderSelectedSummary(m, selected)
+            : renderRouteStatus(m, 'sc-sheet-status-view')}
+          {sheetExpandable && (
+            <button
+              className="sc-icon-button sc-sheet-toggle"
+              aria-expanded={sheetOpen}
+              aria-controls={sheetBodyId}
+              aria-label={t(sheetOpen ? 'mobileCollapseSheet' : 'mobileExpandSheet')}
+              onClick={() => setSheetOpen((open) => !open)}
+            >
+              <ChevronDown size={20} />
+            </button>
+          )}
+        </div>
+      )}
       {(sheetExpandable || sheetNotices) && (
         <div id={sheetBodyId} className="sc-sheet-body" hidden={sheetExpandable && !sheetOpen}>
           {renderBanners(m)}
@@ -1039,6 +1045,9 @@ export const renderMobileShell = (m: PlannerModel) => {
     pickingActive,
     routeEditing,
     shortPlace,
+    googleMode,
+    hasDestination,
+    sheetNotices,
     state,
     weather,
     weatherOpen,
@@ -1061,7 +1070,7 @@ export const renderMobileShell = (m: PlannerModel) => {
             </div>
           )}
         </div>
-        {!routeEditing && renderSheet(m)}
+        {!routeEditing && (!googleMode || hasDestination || sheetNotices) && renderSheet(m)}
       </div>
       {pages.length > 0 && (
         <div className="sc-page-stack" ref={pageStackRef}>

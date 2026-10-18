@@ -2065,9 +2065,10 @@ describe('phone map-first layout', () => {
     });
     render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
-    // An empty trip only asks where to; the start is your location.
-    expect(within(sheet()).getByText('Where are you going?')).toBeVisible();
-    expect(within(sheet()).queryByText('Add a starting point')).not.toBeInTheDocument();
+    // The opening screen is the map and "Where are you going?" alone, with no cost sheet.
+    expect(routeCard()).toHaveTextContent('Where are you going?');
+    expect(screen.queryByRole('region', { name: 'Cost options' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Add a starting point')).not.toBeInTheDocument();
     fireEvent.click(routeCard());
     const destination = within(routePage()).getByLabelText('Destination', { exact: true });
     fireEvent.change(destination, { target: { value: 'Brito' } });
