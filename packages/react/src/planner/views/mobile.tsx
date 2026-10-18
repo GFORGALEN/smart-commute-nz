@@ -471,11 +471,13 @@ export const renderSheet = (m: PlannerModel) => {
   );
 };
 
-// Route page: two compact place rows over the map; searching a place keeps the map in view.
+// Route page: two compact place rows over the map. Both stay while one is searched, start above
+// destination, and the map stays in view below.
 export const renderPlaceRow = (m: PlannerModel, field: 'origin' | 'destination') => {
   const {
     destinationMissing,
     googleMode,
+    locationLoading,
     originMissing,
     searchField,
     searchPlaces,
@@ -491,7 +493,6 @@ export const renderPlaceRow = (m: PlannerModel, field: 'origin' | 'destination')
       className={`sc-place-row ${missing ? 'sc-field-invalid' : ''}`}
       data-field={field}
       data-active={searchField === field || undefined}
-      hidden={searchField !== null && searchField !== field}
       onFocus={() => setSearchField(field)}
     >
       <span
@@ -502,7 +503,13 @@ export const renderPlaceRow = (m: PlannerModel, field: 'origin' | 'destination')
       <input
         className="sc-place-input"
         aria-label={t(field)}
-        placeholder={t(field === 'origin' ? 'mobileSearchStart' : 'mobileWhereTo')}
+        placeholder={t(
+          field === 'destination'
+            ? 'mobileWhereTo'
+            : locationLoading
+              ? 'locating'
+              : 'mobileSearchStart',
+        )}
         value={label}
         autoComplete="off"
         enterKeyHint="search"
@@ -704,7 +711,14 @@ export const renderRoutePage = (m: PlannerModel) => {
           )}
         </div>
         {searchField ? (
-          renderSearchActions(m, searchField)
+          <>
+            {locationError && (
+              <p role="alert" className="sc-error">
+                {t(locationError)}
+              </p>
+            )}
+            {renderSearchActions(m, searchField)}
+          </>
         ) : (
           <>
             {drivingStops.length > 0 && routePanel !== 'stops' && (

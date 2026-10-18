@@ -3260,9 +3260,6 @@ label.sc-route-measurements {
   gap: var(--sc-space-3);
   min-width: 0;
 }
-.sc-place-row[hidden] {
-  display: none;
-}
 .sc-place-row > .sc-route-dot {
   position: static;
   flex: none;

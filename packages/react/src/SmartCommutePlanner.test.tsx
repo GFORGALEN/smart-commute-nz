@@ -1179,6 +1179,8 @@ describe('Google transit fare ranges', () => {
       expect.objectContaining({ estimateMissingTransitFare: true }),
     );
     expectMoneyRange(screen.getByTestId('cost-google-transit-range'), 3, 7.9);
+    // The map draws the route in an effect after the card renders; wait for that call.
+    await waitFor(() => expect(google.renderRoute.mock.lastCall?.[0]).toBe('google-transit-range'));
     const [renderedId, renderOptions] = google.renderRoute.mock.lastCall as [
       string,
       { labels: Record<string, string> },
@@ -1947,11 +1949,12 @@ describe('phone map-first layout', () => {
     expect(window.history.state).toBeNull();
   });
 
-  it('searches one place at a time with its actions listed underneath', async () => {
+  it('searches one place with its actions underneath, keeping the other place in view', async () => {
     render(<SmartCommutePlanner {...defaultProps} />);
     fireEvent.click(routeCard());
     fireEvent.focus(within(routePage()).getByLabelText('Starting point', { exact: true }));
-    expect(within(routePage()).getByLabelText('Destination', { exact: true })).not.toBeVisible();
+    expect(routePage()).toHaveAttribute('data-searching', 'origin');
+    expect(within(routePage()).getByLabelText('Destination', { exact: true })).toBeVisible();
     expect(within(routePage()).getByRole('button', { name: 'Use my location' })).toBeVisible();
     expect(window.history.state).toMatchObject({ smartCommuteLayer: 2 });
     act(() => window.history.back());
@@ -2056,6 +2059,63 @@ describe('phone map-first layout', () => {
       ),
     );
     expect(within(routePage()).getByLabelText('Starting point', { exact: true })).toBeVisible();
+  });
+
+  it('opens "where to" like Google Maps: start is your location, destination is next', async () => {
+    const position = { coords: { latitude: -36.85, longitude: 174.76, accuracy: 20 } };
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      geolocation: {
+        getCurrentPosition: (success: (value: typeof position) => void) => success(position),
+      },
+    });
+    google.suggest.mockResolvedValue([]);
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(routeCard());
+    expect(within(routePage()).getByLabelText('Destination', { exact: true })).toHaveFocus();
+    expect(within(routePage()).getByLabelText('Starting point', { exact: true })).toHaveValue(
+      'My current location',
+    );
+    // No toast: the start simply reads as your location, as it does in Google Maps.
+    expect(screen.queryByText('Start set to your current location')).not.toBeInTheDocument();
+  });
+
+  it('keeps the start empty with the reason when location is refused, then moves on in order', async () => {
+    vi.stubGlobal('navigator', {
+      ...navigator,
+      geolocation: {
+        getCurrentPosition: (
+          _success: unknown,
+          failure: (error: { code: number; PERMISSION_DENIED: number }) => void,
+        ) => failure({ code: 1, PERMISSION_DENIED: 1 }),
+      },
+    });
+    const start = {
+      id: 'nm',
+      main: 'Newmarket',
+      secondary: 'Auckland',
+      text: 'Newmarket, Auckland',
+    };
+    google.suggest.mockResolvedValue([start]);
+    google.select.mockResolvedValue({
+      label: 'Newmarket, Auckland',
+      coordinates: { lat: -36.87, lng: 174.78 },
+    });
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(routeCard());
+    expect(within(routePage()).getByRole('alert')).toHaveTextContent(
+      'Location is blocked for this site',
+    );
+    const origin = within(routePage()).getByLabelText('Starting point', { exact: true });
+    expect(origin).toHaveValue('');
+    fireEvent.focus(origin);
+    fireEvent.change(origin, { target: { value: 'Newm' } });
+    fireEvent.click(await within(routePage()).findByRole('button', { name: /^Newmarket/ }));
+    // With the start chosen and no destination yet, the search moves on to the destination.
+    expect(routePage()).toHaveAttribute('data-searching', 'destination');
+    expect(within(routePage()).getByLabelText('Destination', { exact: true })).toHaveFocus();
   });
 
   it('closes stacked pages one at a time with the system back button', async () => {

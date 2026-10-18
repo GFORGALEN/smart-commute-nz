@@ -79,6 +79,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   // Read by callbacks that finish after a render, such as a position fix.
   const originLabelRef = useRef(state.origin.label);
   originLabelRef.current = state.origin.label;
+  const destinationLabelRef = useRef(state.destination.label);
+  destinationLabelRef.current = state.destination.label;
   const [locale, setLocale] = useState<Locale>(props.locale ?? 'en');
   const [theme, setTheme] = useState<'light' | 'dark'>(props.theme ?? 'light');
   const [screen, setScreen] = useState<Screen>('planner');
@@ -788,7 +790,11 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
    * Reads the browser's position once. "Use my location" always fills the place being searched;
    * the map's locate button only fills an empty start, and both centre the map on a blue dot.
    */
-  const locate = (field: 'origin' | 'destination', setStart: 'always' | 'if-empty') => {
+  const locate = (
+    field: 'origin' | 'destination',
+    setStart: 'always' | 'if-empty',
+    announce = true,
+  ) => {
     setLocationError(null);
     if (typeof window !== 'undefined' && window.isSecureContext === false) {
       setLocationError('locationInsecure');
@@ -814,8 +820,9 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
             ...current,
             [field]: { label: t('currentLocation'), coordinates },
           }));
-        if (fromSearch) setSearchField(null);
-        else if (setStart === 'if-empty' && startSet) setNotice(t('locationSetAsStart'));
+        if (fromSearch) finishPlaceSearch(field);
+        else if (announce && setStart === 'if-empty' && startSet)
+          setNotice(t('locationSetAsStart'));
       },
       (error) => {
         setLocationLoading(false);
@@ -1105,7 +1112,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     setPlaceSuggestions(null);
     // Closing the search drops its history entry through the layer sync below.
     setState((current) => ({ ...current, [field]: { label: suggestion.text } }));
-    setSearchField(null);
+    finishPlaceSearch(field);
     setAddressResolving((count) => count + 1);
     void placeSearch()
       .select(suggestion)
@@ -1758,7 +1765,10 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     pageFocus.current = 'page';
     setPages([...pages, page]);
   };
-  /** Opens the route page already searching one place, keyboard up, like a map app. */
+  /**
+   * "Where to?" works as in Google Maps: both places show, the keyboard is on the destination,
+   * and an empty start becomes your location. A refusal leaves the start empty, with the reason.
+   */
   const startPlaceSearch = (field: 'origin' | 'destination') => {
     flushSync(() => {
       openPage('route');
@@ -1767,6 +1777,19 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     pageStackRef.current
       ?.querySelector<HTMLInputElement>(`.sc-place-row[data-field='${field}'] input`)
       ?.focus();
+    if (!originLabelRef.current.trim()) locate('origin', 'if-empty', false);
+  };
+  /**
+   * After a place is chosen the search moves on in reading order, as a directions app does: a
+   * start with no destination yet goes on to the destination; otherwise the search closes.
+   */
+  const finishPlaceSearch = (field: 'origin' | 'destination') => {
+    if (field === 'origin' && !destinationLabelRef.current.trim()) {
+      setSearchField('destination');
+      pageStackRef.current
+        ?.querySelector<HTMLInputElement>(".sc-place-row[data-field='destination'] input")
+        ?.focus();
+    } else setSearchField(null);
   };
   const restoreRouteDraft = (draft: RouteDraft) => {
     if (draft.fingerprint !== liveQueryFingerprint) restoredFingerprint.current = draft.fingerprint;
@@ -1949,7 +1972,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const applyPlace = (field: 'origin' | 'destination', place: Location) => {
     setState((current) => ({ ...current, [field]: place }));
     // Closing the search drops its history entry through the layer sync.
-    setSearchField(null);
+    if (searchFieldRef.current === field) finishPlaceSearch(field);
+    else setSearchField(null);
   };
   const pageTitles: Record<MobilePage, MessageKey> = {
     route: 'mobileEditRoute',
