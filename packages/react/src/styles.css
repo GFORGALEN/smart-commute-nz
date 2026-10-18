@@ -2777,15 +2777,17 @@ label.sc-route-measurements {
 .sc-sheet-toggle[aria-expanded='false'] svg {
   transform: rotate(180deg);
 }
+/* Name and time on the left, price on the right: the summary takes two lines, not five. */
 .sc-sheet-selected {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: baseline;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 2px var(--sc-space-3);
 }
 .sc-sheet-name {
   display: flex;
-  grid-column: 1 / -1;
+  grid-column: 1;
+  grid-row: 1;
   align-items: center;
   gap: 6px;
   min-width: 0;
@@ -2799,10 +2801,12 @@ label.sc-route-measurements {
   white-space: nowrap;
 }
 .sc-sheet-cost {
-  margin-left: -4px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  margin-right: -4px;
   padding: 0 4px;
   border-radius: 4px;
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: -0.01em;
@@ -2810,13 +2814,19 @@ label.sc-route-measurements {
   white-space: nowrap;
 }
 .sc-sheet-cost.sc-sheet-cost-range {
-  grid-column: 1 / -1;
-  font-size: 20px;
+  font-size: 19px;
 }
 .sc-sheet-meta {
+  display: -webkit-box;
+  grid-column: 1;
+  grid-row: 2;
+  overflow: hidden;
   color: var(--sc-text-2);
   font-size: var(--sc-fs-label);
   font-variant-numeric: tabular-nums;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 .sc-sheet-source {
   grid-column: 1 / -1;
@@ -2858,13 +2868,13 @@ label.sc-route-measurements {
   gap: var(--sc-space-2);
   margin-top: var(--sc-space-1);
 }
+/* The options continue the summary on one surface; no rule splits them into another layer. */
 .sc-sheet-body {
   display: flex;
   flex-direction: column;
-  gap: var(--sc-space-4);
+  gap: var(--sc-space-3);
   min-height: 0;
-  padding: var(--sc-space-4) var(--sc-gutter) var(--sc-space-5);
-  border-top: 1px solid var(--sc-line);
+  padding: var(--sc-space-1) var(--sc-gutter) var(--sc-space-5);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -2893,7 +2903,8 @@ label.sc-route-measurements {
   gap: var(--sc-space-2);
 }
 .sc-sheet-list-head h2 {
-  font-size: var(--sc-fs-title);
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
   font-weight: 650;
 }
 .sc-sheet-sort {
@@ -2905,6 +2916,7 @@ label.sc-route-measurements {
 }
 .sc-sheet-sort select {
   width: auto;
+  height: 36px;
 }
 .sc-sheet-card {
   align-items: start;

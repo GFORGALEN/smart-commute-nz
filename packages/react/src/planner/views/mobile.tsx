@@ -165,6 +165,8 @@ export const renderModeBar = (m: PlannerModel) => {
   );
 };
 
+// Two lines: what was chosen and how long on the left, the price on the right. The source and
+// warnings are listed with the options below, so they only join here while the sheet is closed.
 export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
   const {
     cardLabel,
@@ -172,11 +174,20 @@ export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
     departureAt,
     moneyWithRange,
     resultSource,
+    sheetExpandable,
+    sheetOpen,
     t,
     tripScope,
     valueUpdates,
     wholeMinutes,
   } = m;
+  const source = [
+    resultSource(result),
+    result.totalCostRange ? t('fareRangeBadge') : '',
+    result.warnings.includes('unverified-parking') ? t('parkingWarning') : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return (
     <div className="sc-sheet-selected">
       <span className="sc-sheet-name">
@@ -191,20 +202,13 @@ export const renderSelectedSummary = (m: PlannerModel, result: RouteResult) => {
         {moneyWithRange(result.totalCost, result.totalCostRange)}
       </strong>
       <span className="sc-sheet-meta">
-        <span>{tripScope}</span>
-        {` · ${wholeMinutes(result.totalMinutes)}`}
+        {wholeMinutes(result.totalMinutes)}
         {departureAt !== undefined &&
           ` · ${clockSpan(departureAt, result.breakdown.outbound.totalMinutes)}`}
+        {' · '}
+        <span>{tripScope}</span>
       </span>
-      <span className="sc-sheet-source">
-        {[
-          resultSource(result),
-          result.totalCostRange ? t('fareRangeBadge') : '',
-          result.warnings.includes('unverified-parking') ? t('parkingWarning') : '',
-        ]
-          .filter(Boolean)
-          .join(' · ')}
-      </span>
+      {(!sheetExpandable || !sheetOpen) && <span className="sc-sheet-source">{source}</span>}
     </div>
   );
 };
