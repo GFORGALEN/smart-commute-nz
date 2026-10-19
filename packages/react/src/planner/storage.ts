@@ -3,12 +3,15 @@ import {
   DEFAULT_OWNERSHIP,
   DEFAULT_SETTINGS,
   EXAMPLE_ORIGIN,
+  VEHICLE_PRESETS,
+  type VehicleKind,
   type OwnershipCosts,
   compareOptions,
   createExampleOptions,
   resolveZonedTime,
   validateOwnership,
 } from '@smart-commute/core';
+import { fuelPriceFor } from '@smart-commute/providers';
 import { MOBILE_QUERY, STORAGE_KEY, TIMES_VERSION } from './constants';
 import { hasGoogleProvenance, toLocation } from './helpers';
 import { type LiveMode, type PlannerState, type SmartCommutePlannerProps } from './types';
@@ -93,6 +96,10 @@ function restoreOwnership(saved: unknown): OwnershipCosts {
   }
 }
 
+/** The weekly average for the car's fuel, used on the live site until a price is typed. */
+const averageFuelPrice = (props: SmartCommutePlannerProps, kind: VehicleKind | undefined) =>
+  props.googleApiKey && props.fuelPrice === undefined ? fuelPriceFor(kind) : undefined;
+
 export function initialState(props: SmartCommutePlannerProps): PlannerState {
   // A new live trip on a phone starts one way and now; offline examples keep their round trip.
   const phone = typeof window !== 'undefined' && Boolean(window.matchMedia?.(MOBILE_QUERY).matches);
@@ -102,7 +109,10 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     settings: {
       ...DEFAULT_SETTINGS,
       roundTrip: phone && props.googleApiKey ? false : DEFAULT_SETTINGS.roundTrip,
-      fuelPrice: props.fuelPrice ?? DEFAULT_SETTINGS.fuelPrice,
+      fuelPrice:
+        props.fuelPrice ??
+        averageFuelPrice(props, DEFAULT_SETTINGS.vehicleKind) ??
+        DEFAULT_SETTINGS.fuelPrice,
       fuelConsumption: props.fuelConsumption ?? DEFAULT_SETTINGS.fuelConsumption,
     },
     options: createExampleOptions(),
@@ -114,6 +124,7 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     returnPolicy: 'estimate',
     ownership: { ...DEFAULT_OWNERSHIP },
     applyFareCap: true,
+    fuelPriceChosen: false,
   };
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -128,6 +139,13 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     compareOptions(saved.options, saved.settings);
     if (typeof saved.origin.label !== 'string' || typeof saved.destination.label !== 'string')
       return fallback;
+    // Settings saved before this flag count a price away from the vehicle preset as chosen.
+    const kind = saved.settings.vehicleKind;
+    const fuelPriceChosen =
+      typeof saved.fuelPriceChosen === 'boolean'
+        ? saved.fuelPriceChosen
+        : saved.settings.fuelPrice !== VEHICLE_PRESETS[kind ?? 'petrol'].fuelPrice;
+    const average = fuelPriceChosen ? undefined : averageFuelPrice(props, kind);
     return {
       ...fallback,
       ...saved,
@@ -144,7 +162,7 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
         // Settings saved before congestion pricing get the default rather than none.
         congestionFuelPerHour:
           saved.settings.congestionFuelPerHour ?? DEFAULT_SETTINGS.congestionFuelPerHour,
-        fuelPrice: props.fuelPrice ?? saved.settings.fuelPrice,
+        fuelPrice: props.fuelPrice ?? average ?? saved.settings.fuelPrice,
         fuelConsumption: props.fuelConsumption ?? saved.settings.fuelConsumption,
         // Every live trip on a phone opens one way; a return is chosen per trip, not remembered.
         ...(phone && props.googleApiKey ? { roundTrip: false } : {}),
@@ -166,6 +184,7 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
       ownership: restoreOwnership(saved.ownership),
       applyFareCap: typeof saved.applyFareCap === 'boolean' ? saved.applyFareCap : true,
       priority: saved.priority === 'time' ? 'time' : 'cost',
+      fuelPriceChosen,
     };
   } catch {
     return fallback;

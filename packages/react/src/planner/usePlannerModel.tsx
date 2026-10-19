@@ -23,6 +23,7 @@ import {
 import {
   AT_FARE_RULES,
   fareSnapshotDaysLeft,
+  fuelPriceFor,
   GoogleRouteProvider,
   type GooglePlaceSearch,
   type PlaceSuggestion,
@@ -651,8 +652,26 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     return () => observer.disconnect();
   }, [screen, hasSelection]);
 
+  // A typed fuel price is the rider's own and is kept; otherwise live costs follow the average.
   const updateSettings = (patch: Partial<CommuteSettings>) =>
-    setState((current) => ({ ...current, settings: { ...current.settings, ...patch } }));
+    setState((current) => ({
+      ...current,
+      settings: { ...current.settings, ...patch },
+      ...(patch.fuelPrice !== undefined ? { fuelPriceChosen: true } : {}),
+    }));
+  const followsAverageFuel = Boolean(props.googleApiKey) && !state.fuelPriceChosen;
+  /** Goes back to MBIE's weekly average for the car's fuel, and keeps following it. */
+  const applyAverageFuelPrice = () =>
+    setState((current) => {
+      const average = fuelPriceFor(current.settings.vehicleKind);
+      return average === undefined
+        ? current
+        : {
+            ...current,
+            settings: { ...current.settings, fuelPrice: average },
+            fuelPriceChosen: false,
+          };
+    });
   const updateOwnership = (patch: Partial<OwnershipCosts>) =>
     setState((current) => ({ ...current, ownership: { ...current.ownership, ...patch } }));
   /** A new vehicle type starts from its typical values; a rego left at the old default follows. */
@@ -661,9 +680,17 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
       const previous = current.settings.vehicleKind ?? 'petrol';
       const licenceWasDefault =
         current.ownership.licencePerYear === LICENCE_FEE_BY_VEHICLE[previous];
+      // A car on the average fuel price moves to the average for its new fuel.
+      const average =
+        props.googleApiKey && !current.fuelPriceChosen ? fuelPriceFor(kind) : undefined;
       return {
         ...current,
-        settings: { ...current.settings, ...VEHICLE_PRESETS[kind], vehicleKind: kind },
+        settings: {
+          ...current.settings,
+          ...VEHICLE_PRESETS[kind],
+          ...(average !== undefined ? { fuelPrice: average } : {}),
+          vehicleKind: kind,
+        },
         ownership: licenceWasDefault
           ? { ...current.ownership, licencePerYear: LICENCE_FEE_BY_VEHICLE[kind] }
           : current.ownership,
@@ -2066,6 +2093,8 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     searchField,
     placeSuggestions,
     searchPlaces,
+    followsAverageFuel,
+    applyAverageFuelPrice,
     googleMapsUrl,
     setPriority,
     startPlaceSearch,

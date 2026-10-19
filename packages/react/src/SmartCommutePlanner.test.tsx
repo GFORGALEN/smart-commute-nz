@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmartCommutePlanner, type SmartCommutePlannerProps } from './SmartCommutePlanner';
-import { NZ_FUEL_PRICES, RouteProviderError } from '@smart-commute/providers';
+import { RouteProviderError } from '@smart-commute/providers';
 import {
   AUCKLAND_TIME_ZONE,
   createExampleOptions,
@@ -31,6 +31,18 @@ const google = vi.hoisted(() => ({
 }));
 vi.mock('@smart-commute/providers', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@smart-commute/providers')>()),
+  // A fixed weekly average equal to the vehicle presets keeps live cost expectations stable.
+  NZ_FUEL_PRICES: {
+    ...(await importOriginal<typeof import('@smart-commute/providers')>()).NZ_FUEL_PRICES,
+    weekEnding: '2026-10-09',
+    prices: {
+      regular: { retail: 3.5, board: 3.55 },
+      premium: { retail: 3.65, board: 3.7 },
+      diesel: { retail: 3.2, board: 3.25 },
+    },
+  },
+  fuelPriceFor: (kind?: string) =>
+    kind === 'electric' ? undefined : kind === 'diesel' ? 3.2 : 3.5,
   GoogleRouteProvider: class {
     constructor(options: unknown) {
       google.configure(options);
@@ -2078,16 +2090,38 @@ describe('phone map-first layout', () => {
     expect(link).toHaveAttribute('target', '_blank');
   });
 
-  it("opens on this week's fuel prices and applies the national average on request", async () => {
+  it("opens on this week's fuel prices, which price driving until a rider types their own", async () => {
     render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
     const card = screen.getByRole('region', { name: 'Fuel this week' });
-    const regular = `$${NZ_FUEL_PRICES.prices.regular.retail.toFixed(2)}`;
-    expect(card).toHaveTextContent(`91 petrol${regular}/L`);
+    expect(card).toHaveTextContent('91 petrol$3.50/L');
     expect(card).toHaveTextContent('Bus and train from $3.00 · AT HOP 7-day cap $50');
-    fireEvent.click(within(card).getByRole('button', { name: `Use ${regular}/L` }));
-    expect(await screen.findByText(`Driving costs now use ${regular}/L`)).toBeVisible();
-    expect(within(card).queryByRole('button', { name: /^Use / })).not.toBeInTheDocument();
+    // A new rider follows the average, so there is nothing to apply.
+    expect(card).toHaveTextContent('used for driving costs');
+    expect(within(card).queryByRole('button')).not.toBeInTheDocument();
+  });
+
+  it('keeps a typed fuel price, and offers the weekly average to go back to', async () => {
+    localStorage.setItem(
+      'smart-commute-nz:v1',
+      JSON.stringify({
+        origin: { label: '' },
+        destination: { label: '' },
+        settings: { ...DEFAULT_SETTINGS, fuelPrice: 4.2 },
+        options: createExampleOptions(),
+        timesVersion: 2,
+        fuelPriceChosen: true,
+      }),
+    );
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    const card = screen.getByRole('region', { name: 'Fuel this week' });
+    fireEvent.click(within(card).getByRole('button', { name: 'Use the average, $3.50/L' }));
+    expect(await screen.findByText('Driving costs now use $3.50/L')).toBeVisible();
+    expect(within(card).queryByRole('button')).not.toBeInTheDocument();
+    expect(
+      JSON.parse(localStorage.getItem('smart-commute-nz:v1')!) as { fuelPriceChosen: boolean },
+    ).toMatchObject({ fuelPriceChosen: false, settings: { fuelPrice: 3.5 } });
   });
 
   it('switches language from the map in one tap', () => {

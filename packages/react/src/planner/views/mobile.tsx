@@ -1009,7 +1009,16 @@ export const renderPage = (m: PlannerModel, page: MobilePage, index: number) => 
 // Before a destination, the space under the map carries this week's prices: fuel from MBIE's
 // weekly monitoring and the AT fare floor, with a tap to price driving at the national average.
 export const renderOpeningCard = (m: PlannerModel) => {
-  const { locale, money, plannerId, setNotice, state, t, updateSettings } = m;
+  const {
+    applyAverageFuelPrice,
+    followsAverageFuel,
+    locale,
+    money,
+    plannerId,
+    setNotice,
+    state,
+    t,
+  } = m;
   const fuel = NZ_FUEL_PRICES;
   const stale = fuelPriceAgeDays() > 21;
   const yours = fuelPriceFor(state.settings.vehicleKind);
@@ -1053,18 +1062,23 @@ export const renderOpeningCard = (m: PlannerModel) => {
         })}
       </p>
       <div className="sc-opening-foot">
-        <span>{t('fuelSource')}</span>
-        {yours !== undefined && Math.abs(yours - state.settings.fuelPrice) >= 0.005 && (
-          <button
-            className="sc-text-button"
-            onClick={() => {
-              updateSettings({ fuelPrice: yours });
-              setNotice(t('fuelApplied', { price: money(yours) }));
-            }}
-          >
-            {t('fuelUseThis', { price: money(yours) })}
-          </button>
-        )}
+        <span>
+          {t('fuelSource')}
+          {followsAverageFuel && yours !== undefined && ` · ${t('fuelInUse')}`}
+        </span>
+        {!followsAverageFuel &&
+          yours !== undefined &&
+          Math.abs(yours - state.settings.fuelPrice) >= 0.005 && (
+            <button
+              className="sc-text-button"
+              onClick={() => {
+                applyAverageFuelPrice();
+                setNotice(t('fuelApplied', { price: money(yours) }));
+              }}
+            >
+              {t('fuelUseThis', { price: money(yours) })}
+            </button>
+          )}
       </div>
     </section>
   );

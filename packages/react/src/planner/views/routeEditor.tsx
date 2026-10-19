@@ -6,6 +6,7 @@ import {
   type VehicleKind,
 } from '@smart-commute/core';
 import { type MessageKey } from '@smart-commute/i18n';
+import { NZ_FUEL_PRICES, fuelPriceFor } from '@smart-commute/providers';
 import { ATFareHelper } from '../../ATFareHelper';
 import { directionKeys, legKeys } from '../constants';
 import { NumberField, TextField } from '../fields';
@@ -587,6 +588,26 @@ const vehicleLabels: Record<VehicleKind, MessageKey> = {
 };
 
 /** The vehicle and what it runs on; only the fields that apply to its type are shown. */
+// Says where the fuel price comes from: MBIE's weekly average, followed until a price is typed,
+// or the rider's own, with a way back to the average.
+const renderFuelPriceSource = (m: PlannerModel) => {
+  const { applyAverageFuelPrice, followsAverageFuel, money, props, state, t } = m;
+  const average = fuelPriceFor(state.settings.vehicleKind);
+  if (!props.googleApiKey || average === undefined) return null;
+  if (followsAverageFuel)
+    return (
+      <p className="sc-help">{t('fuelFollowsAverage', { date: NZ_FUEL_PRICES.weekEnding })}</p>
+    );
+  return (
+    <p className="sc-help">
+      {t('fuelYours')}{' '}
+      <button className="sc-text-button" onClick={applyAverageFuelPrice}>
+        {t('fuelUseThis', { price: money(average) })}
+      </button>
+    </p>
+  );
+};
+
 export const renderCarFields = (m: PlannerModel) => {
   const { chooseVehicle, state, t, updateSettings } = m;
   const { settings } = state;
@@ -610,12 +631,15 @@ export const renderCarFields = (m: PlannerModel) => {
       <div className="sc-field-grid">
         {usesFuel && (
           <>
-            <NumberField
-              label={t('fuelPrice')}
-              value={settings.fuelPrice}
-              onChange={(fuelPrice) => updateSettings({ fuelPrice })}
-              t={t}
-            />
+            <div className="sc-fuel-price-field">
+              <NumberField
+                label={t('fuelPrice')}
+                value={settings.fuelPrice}
+                onChange={(fuelPrice) => updateSettings({ fuelPrice })}
+                t={t}
+              />
+              {renderFuelPriceSource(m)}
+            </div>
             <NumberField
               label={t(kind === 'plug-in-hybrid' ? 'fuelConsumptionOnFuel' : 'fuelConsumption')}
               value={settings.fuelConsumption}

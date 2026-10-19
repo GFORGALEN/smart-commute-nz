@@ -56,6 +56,11 @@ export interface PlannerState {
   applyFareCap: boolean;
   /** What a new set of routes is sorted and chosen by: the lowest price or the shortest time. */
   priority?: RoutePriority;
+  /**
+   * True once the rider types a fuel price. Until then live planning follows MBIE's weekly
+   * national average for the car's fuel; the offline example keeps its fixed values.
+   */
+  fuelPriceChosen?: boolean;
 }
 export type RoutePriority = 'cost' | 'time';
 export type LiveMode = 'drive' | 'transit';
