@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AT_FARE_RULES, fareSnapshotDaysLeft } from './fares';
+import { NZ_FUEL_PRICES, fuelPriceAgeDays } from './fuel-prices';
 
 /**
  * Runs on the real clock, so CI starts failing a month before the AT fare snapshot stops
@@ -11,6 +12,15 @@ describe('data freshness', () => {
       fareSnapshotDaysLeft(),
       `AT_FARE_RULES covers travel until ${AT_FARE_RULES.validUntil}. Check ${AT_FARE_RULES.sourceUrl} for the new table, then update the amounts, dates and validUntil.`,
     ).toBeGreaterThan(30);
+  });
+});
+
+describe('weekly fuel prices', () => {
+  it('stays within three weeks of MBIE, which the fuel-prices workflow updates', () => {
+    expect(
+      fuelPriceAgeDays(),
+      `Fuel prices are for the week ending ${NZ_FUEL_PRICES.weekEnding}. Check the fuel-prices workflow, or run node scripts/update-fuel-prices.mjs.`,
+    ).toBeLessThanOrEqual(21);
   });
 });
 

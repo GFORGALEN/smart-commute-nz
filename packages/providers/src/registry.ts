@@ -253,9 +253,10 @@ export const DATA_SOURCES: readonly DataSource[] = [
     id: 'mbie-energy-prices',
     name: 'MBIE weekly fuel prices and domestic electricity survey',
     url: 'https://www.mbie.govt.nz/building-and-energy/energy-and-natural-resources/energy-statistics-and-modelling/energy-statistics/weekly-fuel-price-monitoring',
-    service: 'Weekly CSV and quarterly survey; referenced manually',
+    service:
+      'Weekly fuel CSV fetched each morning by the fuel-prices workflow; quarterly electricity survey referenced manually',
     fields: ['fuelPrice', 'electricityPrice'],
-    status: 'manual',
+    status: 'integrated',
     verifiedOn: '2026-10-13',
     sourceUpdatedOn: '2026-10-07',
     updateFrequency: 'Fuel weekly; electricity quarterly',
@@ -264,7 +265,7 @@ export const DATA_SOURCES: readonly DataSource[] = [
     commercialUse: 'yes',
     redistribution: 'yes',
     limitations: [
-      'Board prices, week ending 2 Oct 2026: regular petrol NZ$3.47/L, diesel NZ$3.20/L.',
+      'Fuel: national average adjusted retail price (after typical discounts) per litre, not an Auckland station price; shown as a weekly reference and applied only when the user chooses.',
       'Electricity: Auckland Central retail NZ$0.413/kWh on 15 Aug 2026, low-user tariff.',
       'Defaults are not today’s pump or plan price; users enter their own.',
     ],

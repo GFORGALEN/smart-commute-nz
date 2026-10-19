@@ -2764,6 +2764,79 @@ label.sc-route-measurements {
   flex: none;
 }
 
+/* Opening card: this week's reference prices under the map until a destination is chosen. */
+.sc-opening {
+  position: relative;
+  z-index: 4;
+  flex: none;
+  display: grid;
+  gap: var(--sc-space-2);
+  padding: var(--sc-space-4) var(--sc-gutter) calc(var(--sc-space-4) + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--sc-line);
+  border-radius: 16px 16px 0 0;
+  background: var(--sc-surface);
+  box-shadow: var(--sc-shadow-raised);
+}
+.sc-opening-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sc-space-2);
+}
+.sc-opening-head h2 {
+  font-size: var(--sc-fs-title);
+  font-weight: 650;
+}
+.sc-opening-head span,
+.sc-opening-foot span {
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+}
+.sc-opening-prices {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sc-space-2);
+  margin: 0;
+}
+.sc-opening-prices > div {
+  padding: var(--sc-space-2) var(--sc-space-3);
+  border: 1px solid var(--sc-accent-tint-line);
+  border-radius: 10px;
+  background: var(--sc-accent-tint);
+}
+.sc-opening-prices dt {
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-caption);
+  font-weight: 600;
+}
+.sc-opening-prices dd {
+  margin: 0;
+  font-size: var(--sc-fs-title);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.sc-opening-prices small {
+  margin-left: 1px;
+  color: var(--sc-muted);
+  font-size: var(--sc-fs-caption);
+  font-weight: 500;
+}
+.sc-opening-note {
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
+}
+.sc-opening-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sc-space-2);
+  min-height: 32px;
+}
+.sc-opening-foot .sc-text-button {
+  min-height: 44px;
+  font-weight: 650;
+}
+
 /* Cost sheet: collapsed shows the selected cost; open adds options and next steps. */
 .sc-sheet {
   position: relative;

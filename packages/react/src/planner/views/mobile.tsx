@@ -16,6 +16,12 @@ import {
   X,
 } from 'lucide-react';
 import { type RouteResult } from '@smart-commute/core';
+import {
+  AT_FARE_RULES,
+  NZ_FUEL_PRICES,
+  fuelPriceAgeDays,
+  fuelPriceFor,
+} from '@smart-commute/providers';
 import { type MessageKey } from '@smart-commute/i18n';
 import { WeatherBar } from '../../WeatherBar';
 import { ModeIcon } from '../fields';
@@ -1000,6 +1006,70 @@ export const renderPage = (m: PlannerModel, page: MobilePage, index: number) => 
   );
 };
 
+// Before a destination, the space under the map carries this week's prices: fuel from MBIE's
+// weekly monitoring and the AT fare floor, with a tap to price driving at the national average.
+export const renderOpeningCard = (m: PlannerModel) => {
+  const { locale, money, plannerId, setNotice, state, t, updateSettings } = m;
+  const fuel = NZ_FUEL_PRICES;
+  const stale = fuelPriceAgeDays() > 21;
+  const yours = fuelPriceFor(state.settings.vehicleKind);
+  const week = new Intl.DateTimeFormat(locale === 'zh-CN' ? 'zh-CN' : 'en-NZ', {
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'Pacific/Auckland',
+  }).format(new Date(`${fuel.weekEnding}T12:00:00+13:00`));
+  const titleId = `${plannerId}-opening`;
+  return (
+    <section className="sc-opening" aria-labelledby={titleId}>
+      <div className="sc-opening-head">
+        <h2 id={titleId}>{t('fuelThisWeek')}</h2>
+        <span>
+          {t('fuelWeekEnding', { date: week })}
+          {stale && ` · ${t('fuelMayBeOld')}`}
+        </span>
+      </div>
+      <dl className="sc-opening-prices">
+        {(
+          [
+            ['regular', 'fuel91'],
+            ['premium', 'fuel95'],
+            ['diesel', 'fuelDiesel'],
+          ] as const
+        ).map(([key, label]) => (
+          <div key={key}>
+            <dt>{t(label)}</dt>
+            <dd>
+              {money(fuel.prices[key].retail)}
+              <small>/L</small>
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <p className="sc-opening-note">
+        {t('openingTransitFrom', {
+          fare: money(AT_FARE_RULES.adult[0]),
+          // A whole-dollar cap reads as $50, not $50.00.
+          cap: money(AT_FARE_RULES.hop7DayCap).replace(/\.00$/, ''),
+        })}
+      </p>
+      <div className="sc-opening-foot">
+        <span>{t('fuelSource')}</span>
+        {yours !== undefined && Math.abs(yours - state.settings.fuelPrice) >= 0.005 && (
+          <button
+            className="sc-text-button"
+            onClick={() => {
+              updateSettings({ fuelPrice: yours });
+              setNotice(t('fuelApplied', { price: money(yours) }));
+            }}
+          >
+            {t('fuelUseThis', { price: money(yours) })}
+          </button>
+        )}
+      </div>
+    </section>
+  );
+};
+
 export const renderMobileShell = (m: PlannerModel) => {
   const {
     googleMode,
@@ -1019,7 +1089,8 @@ export const renderMobileShell = (m: PlannerModel) => {
           {pickingActive ? renderPickBar(m) : renderMapTop(m)}
           {!pickingActive && !routeEditing && renderLocateButton(m)}
         </div>
-        {!routeEditing && (!googleMode || hasDestination || sheetNotices) && renderSheet(m)}
+        {!routeEditing &&
+          (!googleMode || hasDestination || sheetNotices ? renderSheet(m) : renderOpeningCard(m))}
       </div>
       {pages.length > 0 && (
         <div className="sc-page-stack" ref={pageStackRef}>

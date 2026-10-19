@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmartCommutePlanner, type SmartCommutePlannerProps } from './SmartCommutePlanner';
-import { RouteProviderError } from '@smart-commute/providers';
+import { NZ_FUEL_PRICES, RouteProviderError } from '@smart-commute/providers';
 import {
   AUCKLAND_TIME_ZONE,
   createExampleOptions,
@@ -2076,6 +2076,18 @@ describe('phone map-first layout', () => {
     expect(params.get('destination')).toBe('Britomart, Auckland');
     expect(params.get('travelmode')).toBe('driving');
     expect(link).toHaveAttribute('target', '_blank');
+  });
+
+  it("opens on this week's fuel prices and applies the national average on request", async () => {
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    const card = screen.getByRole('region', { name: 'Fuel this week' });
+    const regular = `$${NZ_FUEL_PRICES.prices.regular.retail.toFixed(2)}`;
+    expect(card).toHaveTextContent(`91 petrol${regular}/L`);
+    expect(card).toHaveTextContent('Bus and train from $3.00 · AT HOP 7-day cap $50');
+    fireEvent.click(within(card).getByRole('button', { name: `Use ${regular}/L` }));
+    expect(await screen.findByText(`Driving costs now use ${regular}/L`)).toBeVisible();
+    expect(within(card).queryByRole('button', { name: /^Use / })).not.toBeInTheDocument();
   });
 
   it('switches language from the map in one tap', () => {

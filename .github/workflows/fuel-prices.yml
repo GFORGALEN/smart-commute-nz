@@ -1,0 +1,35 @@
+name: Fuel prices
+# MBIE publishes average NZ fuel prices weekly (CC BY 4.0). This checks each morning and commits
+# packages/providers/src/data/nz-fuel-prices.json only when a new week appears, so the planner's
+# reference prices stay current without an API or a key. Pushing to main redeploys the site.
+on:
+  schedule:
+    - cron: '0 20 * * *' # 08:00 or 09:00 in Auckland
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: fuel-prices
+  cancel-in-progress: false
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: node scripts/update-fuel-prices.mjs
+      - name: Commit a new week of prices
+        run: |
+          file=packages/providers/src/data/nz-fuel-prices.json
+          if git diff --quiet -- "$file"; then
+            echo "No new MBIE week."
+            exit 0
+          fi
+          week=$(node -p "require('./$file').weekEnding")
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "Update fuel prices from MBIE for the week ending $week"
+          git push
