@@ -1888,7 +1888,8 @@ describe('phone map-first layout', () => {
       <SmartCommutePlanner {...defaultProps} {...liveStart} googleApiKey="restricted-test-key" />,
     );
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
-    await within(sheet()).findByText('Places are ready. Plan the route to compare costs.');
+    // Both places came with the page, so the phone plans at once without a Plan route tap.
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
   };
 
   beforeEach(() => {
@@ -1998,25 +1999,7 @@ describe('phone map-first layout', () => {
     expect(window.history.state).toMatchObject({ smartCommuteLayer: 1 });
   });
 
-  it('prices public transport from the AT zones a rider picks, with no Google fare', async () => {
-    google.getRoutes.mockReset().mockResolvedValue(rangedTransitResponse());
-    await renderLivePhone();
-    expect(google.configure).toHaveBeenCalledWith(
-      expect.objectContaining({ useGoogleTransitFare: false }),
-    );
-    fireEvent.click(within(sheet()).getByRole('button', { name: 'Public transport' }));
-    const cost = await within(sheet()).findByTestId('selected-cost');
-    await waitFor(() => expect(cost).toHaveTextContent('$3.00–$7.90'));
-    const zones = within(sheet()).getByRole('group', {
-      name: 'How many AT fare zones this trip passes through',
-    });
-    fireEvent.click(within(zones).getByRole('button', { name: '2' }));
-    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $4.90');
-    fireEvent.click(within(zones).getByRole('button', { name: '2' }));
-    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('$3.00–$7.90');
-  });
-
-  it('preselects the zones counted on the AT map, and lets a rider override them', async () => {
+  it('prices public transport by the zones AT counts, with no Google fare and no zone buttons', async () => {
     const counted = rangedTransitResponse();
     counted.routes[0]!.outbound[0]!.fareRange = {
       ...counted.routes[0]!.outbound[0]!.fareRange,
@@ -2026,22 +2009,13 @@ describe('phone map-first layout', () => {
     } as never;
     google.getRoutes.mockReset().mockResolvedValue(counted);
     await renderLivePhone();
+    expect(google.configure).toHaveBeenCalledWith(
+      expect.objectContaining({ useGoogleTransitFare: false }),
+    );
     fireEvent.click(within(sheet()).getByRole('button', { name: 'Public transport' }));
     const cost = await within(sheet()).findByTestId('selected-cost');
     await waitFor(() => expect(cost).toHaveTextContent('Approx. $4.90'));
-    const zones = within(sheet()).getByRole('group', {
-      name: 'How many AT fare zones this trip passes through',
-    });
-    expect(within(zones).getByRole('button', { name: '2' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    );
-    expect(within(sheet()).getByText('From AT’s zone map: Isthmus → City')).toBeVisible();
-    fireEvent.click(within(zones).getByRole('button', { name: '3' }));
-    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $6.50');
-    expect(within(sheet()).getByText('Your choice · AT’s zone map counts 2')).toBeVisible();
-    fireEvent.click(within(zones).getByRole('button', { name: '3' }));
-    expect(within(sheet()).getByTestId('selected-cost')).toHaveTextContent('Approx. $4.90');
+    expect(within(sheet()).queryByRole('group', { name: /AT fare zones/ })).not.toBeInTheDocument();
   });
 
   it('plans by itself once the destination is chosen, with no tap on Plan route', async () => {
@@ -2096,7 +2070,7 @@ describe('phone map-first layout', () => {
 
   it('opens the planned trip in Google Maps from the map tools', () => {
     render(<SmartCommutePlanner {...defaultProps} />);
-    const link = screen.getByRole('link', { name: 'Open this trip in Google Maps' });
+    const link = screen.getByRole('link', { name: 'Open Google Maps' });
     const params = new URL(link.getAttribute('href')!).searchParams;
     expect(params.get('origin')).toBe('4 Fong Road, Auckland');
     expect(params.get('destination')).toBe('Britomart, Auckland');
@@ -2238,8 +2212,10 @@ describe('phone map-first layout', () => {
     const drive = within(sheet()).getByRole('button', { name: 'Drive' });
     expect(drive).toHaveAttribute('aria-pressed', 'true');
     expect(within(sheet()).getByRole('button', { name: 'Public transport' })).toBeEnabled();
-    // Opening the map is not a route request.
-    expect(google.getRoutes).not.toHaveBeenCalled();
+    // With both places given, opening plans once, one way and now, with no Plan route step.
+    expect(google.getRoutes).toHaveBeenCalledTimes(1);
+    expect(google.getRoutes.mock.calls[0]![0]).toMatchObject({ mode: 'drive', roundTrip: false });
+    expect(within(sheet()).queryByRole('button', { name: 'Plan route' })).not.toBeInTheDocument();
   });
 
   it('shows the latest mode only, even when an older request answers last', async () => {
@@ -2249,7 +2225,6 @@ describe('phone map-first layout', () => {
       .mockImplementationOnce(() => driving.promise)
       .mockImplementationOnce(() => transit.promise);
     await renderLivePhone();
-    fireEvent.click(within(sheet()).getByRole('button', { name: 'Plan route' }));
     expect(await within(sheet()).findByText('Finding driving routes…')).toBeInTheDocument();
     fireEvent.click(within(sheet()).getByRole('button', { name: 'Public transport' }));
     expect(
@@ -2283,7 +2258,6 @@ describe('phone map-first layout', () => {
       new RouteProviderError('NO_ROUTES', 'Google returned no routes for these inputs.'),
     );
     await renderLivePhone();
-    fireEvent.click(within(sheet()).getByRole('button', { name: 'Plan route' }));
     expect(
       await within(sheet()).findByText('No driving route was found for these places at this time.'),
     ).toBeInTheDocument();
@@ -2348,11 +2322,11 @@ describe('phone map-first layout', () => {
   });
 
   it('keeps a found outbound route when no return exists at the chosen time', async () => {
+    await renderLivePhone();
     google.getRoutes.mockResolvedValueOnce({
       ...liveResponse('google-out-only'),
       returnStatus: 'no-routes' as const,
     });
-    await renderLivePhone();
     fireEvent.click(routeCard());
     fireEvent.click(within(routePage()).getByRole('button', { name: /Leave now · one way/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Return trip' }));
@@ -2376,16 +2350,17 @@ describe('phone map-first layout', () => {
     expect(screen.queryByTestId('selected-cost')).not.toBeInTheDocument();
     expect(within(sheet()).getByRole('button', { name: 'Make it one way' })).toBeEnabled();
     fireEvent.click(within(sheet()).getByRole('button', { name: 'Use a budget estimate' }));
-    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(2));
-    expect(google.getRoutes.mock.calls[1]![0]).toMatchObject({ roundTrip: false });
     expect(
       await within(sheet()).findByText(/return budget estimate · return not live/),
     ).toBeVisible();
+    // The estimate needs the one-way route the opening request already found: no new request.
+    expect(google.getRoutes).toHaveBeenCalledTimes(2);
+    expect(google.getRoutes.mock.calls[0]![0]).toMatchObject({ roundTrip: false });
   });
 
   it('sends Auckland instants for a scheduled commute and checks their order first', async () => {
-    google.getRoutes.mockResolvedValueOnce(liveResponse('google-commute', true));
     await renderLivePhone();
+    google.getRoutes.mockResolvedValueOnce(liveResponse('google-commute', true));
     fireEvent.click(routeCard());
     fireEvent.click(within(routePage()).getByRole('button', { name: /Leave now · one way/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Return trip' }));
@@ -2420,8 +2395,8 @@ describe('phone map-first layout', () => {
       }),
     ).toBeInTheDocument();
     fireEvent.click(within(routePage()).getByRole('button', { name: 'Plan route' }));
-    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(1));
-    const request = google.getRoutes.mock.calls[0]![0];
+    await waitFor(() => expect(google.getRoutes).toHaveBeenCalledTimes(2));
+    const request = google.getRoutes.mock.calls[1]![0];
     // 08:00 and 18:00 in Auckland daylight time, wherever the browser is.
     expect(request.departureTime.getTime()).toBe(Date.UTC(2026, 9, 12, 19, 0));
     expect(request.returnTime.getTime()).toBe(Date.UTC(2026, 9, 13, 5, 0));

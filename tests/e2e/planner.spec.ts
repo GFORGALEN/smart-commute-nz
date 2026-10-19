@@ -362,13 +362,14 @@ test('phones open on a usable map with the route and cost in view at common widt
         map: box('.sc-mobile-map'),
         card: box('.sc-route-card'),
         cost: box('[data-testid="selected-cost"]'),
-        tools: [...document.querySelectorAll('.sc-map-tool')].map((tool) => {
+        tools: [...document.querySelectorAll('.sc-map-tool:not(.sc-map-open)')].map((tool) => {
           const rect = tool.getBoundingClientRect();
           return { top: Math.round(rect.top), width: rect.width, height: rect.height };
         }),
       };
     });
-    // The summary has its own row; the tools sit side by side beneath it at touch size.
+    // The summary has its own row; the square tools sit side by side beneath it at touch size.
+    // The Google Maps bar shares their row where its label fits and takes its own line if not.
     expect(new Set(layout.tools.map((tool) => tool.top)).size).toBe(1);
     expect(layout.tools[0]!.top).toBeGreaterThan(layout.card.bottom);
     for (const tool of layout.tools) {

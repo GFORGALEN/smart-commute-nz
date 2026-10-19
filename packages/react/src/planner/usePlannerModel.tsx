@@ -51,7 +51,6 @@ import {
   hasGoogleProvenance,
   shortNumber,
   toLocation,
-  withATZones,
 } from './helpers';
 import {
   failedRouteOutcome,
@@ -300,27 +299,9 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
         : option.id === 'hybrid'
           ? t('hybridName')
           : option.name;
-  // Zone counts picked on the phone sheet, per route and per set of trip conditions.
-  const [atZones, setATZones] = useState<Record<string, number>>({});
-  const atZoneKey = (optionId: string) => `${liveQueryFingerprint}|${optionId}`;
-  const pricedOptions = useMemo(
-    () =>
-      visibleOptions.map((option) => {
-        const zones = atZones[`${liveQueryFingerprint}|${option.id}`];
-        return zones ? withATZones(option, zones) : option;
-      }),
-    [visibleOptions, atZones, liveQueryFingerprint],
-  );
-  const chooseATZones = (optionId: string, zones: number | null) =>
-    setATZones((current) => {
-      const next = { ...current };
-      if (zones) next[atZoneKey(optionId)] = zones;
-      else delete next[atZoneKey(optionId)];
-      return next;
-    });
   const comparison = useMemo(
-    () => buildComparison(state, pricedOptions, atFareContexts, currentMinute),
-    [state, pricedOptions, atFareContexts, currentMinute],
+    () => buildComparison(state, visibleOptions, atFareContexts, currentMinute),
+    [state, visibleOptions, atFareContexts, currentMinute],
   );
   const noComparableRoutesKey: MessageKey =
     comparison.staleFareOptions.length || comparison.pendingFareOptions.length
@@ -1977,6 +1958,22 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   useEffect(() => {
     if (!routeEditing) autoPlanPending.current = false;
   }, [routeEditing]);
+  // A phone that opens with both places already given, as from a shared link, plans at once
+  // rather than waiting on a Plan route button. Later changes re-plan through the timer above.
+  const routeIdle = routeStatus.state === 'idle';
+  useEffect(() => {
+    if (!isMobile || !googleMode || googleStatus !== 'ready' || routeEditing) return;
+    if (!routeIdle || !placesReady || routeConfirmBlocked || lastRequestedQuery.current) return;
+    void routeAction.current(liveModeRef.current);
+  }, [
+    isMobile,
+    googleMode,
+    googleStatus,
+    routeEditing,
+    routeIdle,
+    placesReady,
+    routeConfirmBlocked,
+  ]);
   // Times later than today carry their date so a summary never reads as today by mistake.
   const shortWhen = (instant: number) =>
     aucklandDay.format(instant) === aucklandDay.format(currentMinute * 60000)
@@ -2070,9 +2067,6 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     placeSuggestions,
     searchPlaces,
     googleMapsUrl,
-    atZones,
-    atZoneKey,
-    chooseATZones,
     setPriority,
     startPlaceSearch,
     choosePlaceSuggestion,

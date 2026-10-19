@@ -2668,16 +2668,50 @@ label.sc-route-measurements {
   font-weight: 550;
   white-space: nowrap;
 }
+/* Open in Google Maps: a labelled bar filling the rest of the tool row. The phone widths keep
+   the whole label by dropping the icon and then a point of text size. */
+.sc-map-tool.sc-map-open {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 var(--sc-space-2);
+  color: var(--sc-accent-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+.sc-map-open > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (max-width: 429px) {
+  .sc-map-open > svg {
+    display: none;
+  }
+}
+@media (max-width: 389px) {
+  .sc-map-tool.sc-map-open {
+    font-size: 12px;
+  }
+}
+/* Narrower than an iPhone SE, the bar takes its own line rather than cut its label. */
+@media (max-width: 374px) {
+  .sc-map-tools {
+    flex-wrap: wrap;
+  }
+  .sc-map-tool.sc-map-open {
+    flex-basis: 100%;
+    font-size: 13px;
+  }
+}
 .sc-map-tool[aria-expanded='true'] {
   border-color: var(--sc-accent);
   color: var(--sc-accent-text);
 }
 /* Phones keep the icons, so all five tools fit one row; the names stay for screen readers. */
 @media (max-width: 539px) {
-  .sc-map-tool {
+  .sc-map-tool:not(.sc-map-open) {
     padding: 0;
   }
-  .sc-map-tool > span {
+  .sc-map-tool:not(.sc-map-open) > span {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -2705,12 +2739,8 @@ label.sc-route-measurements {
 .sc-map-locate:disabled {
   color: var(--sc-muted);
 }
+/* Opens in the top stack under the tools, however many rows they take. */
 .sc-mobile-weather {
-  position: absolute;
-  top: calc(env(safe-area-inset-top) + 132px);
-  right: var(--sc-space-3);
-  left: var(--sc-space-3);
-  z-index: 2;
   overflow: hidden;
   border: 1px solid var(--sc-line);
   border-radius: 12px;
@@ -2863,53 +2893,6 @@ label.sc-route-measurements {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 1;
   line-clamp: 1;
-}
-/* AT zones: counted from AT's zone map, or set with one tap; the fare follows the AT table. */
-.sc-zone-picker-wrap {
-  grid-column: 1 / -1;
-  margin-top: var(--sc-space-1);
-}
-.sc-zone-picker {
-  display: flex;
-  align-items: center;
-  gap: var(--sc-space-1);
-  font-size: var(--sc-fs-label);
-}
-.sc-zone-picker-note {
-  margin-top: 2px;
-  overflow: hidden;
-  color: var(--sc-muted);
-  font-size: var(--sc-fs-caption);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sc-zone-picker-label {
-  margin-right: var(--sc-space-1);
-  color: var(--sc-text-2);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.sc-zone-picker button {
-  flex: none;
-  min-width: 36px;
-  min-height: 32px;
-  border: 1px solid var(--sc-accent-tint-line);
-  border-radius: 8px;
-  background: var(--sc-surface);
-  color: var(--sc-text);
-  font-weight: 650;
-  font-variant-numeric: tabular-nums;
-}
-.sc-zone-picker button[aria-pressed='true'] {
-  border-color: var(--sc-accent);
-  background: var(--sc-accent);
-  color: var(--sc-on-accent);
-}
-.sc-zone-picker a {
-  margin-left: auto;
-  white-space: nowrap;
-  color: var(--sc-accent-text);
-  font-weight: 600;
 }
 .sc-sheet-source {
   grid-column: 1 / -1;
@@ -3148,9 +3131,6 @@ label.sc-route-measurements {
   }
   .sc-mobile-top .sc-route-card {
     flex: 1;
-  }
-  .sc-mobile-weather {
-    top: calc(env(safe-area-inset-top) + 80px);
   }
   .sc-mobile .sc-schematic {
     padding-top: calc(env(safe-area-inset-top) + 84px);
