@@ -2837,6 +2837,62 @@ label.sc-route-measurements {
   font-weight: 650;
 }
 
+/* Fuel detour calculator: inputs two to a row, then a verdict panel with its sums. */
+.sc-fuel-detour {
+  display: grid;
+  gap: var(--sc-space-3);
+}
+.sc-fuel-detour-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+  gap: var(--sc-space-2) var(--sc-space-3);
+}
+.sc-fuel-detour-hint {
+  grid-column: 1 / -1;
+  margin-top: calc(var(--sc-space-1) * -1);
+}
+.sc-fuel-detour-empty {
+  color: var(--sc-muted);
+}
+.sc-fuel-detour-result {
+  display: grid;
+  gap: var(--sc-space-2);
+  padding: var(--sc-space-4);
+  border: 1px solid var(--sc-accent-tint-line);
+  border-radius: 12px;
+  background: var(--sc-accent-tint);
+}
+.sc-fuel-detour-result.is-not {
+  border-color: var(--sc-warn-line);
+  background: var(--sc-warn-bg);
+}
+.sc-fuel-detour-result strong {
+  font-size: var(--sc-fs-title);
+}
+.sc-fuel-detour-result.is-not strong {
+  color: var(--sc-warn-text);
+}
+.sc-fuel-detour-result dl {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+.sc-fuel-detour-result dl > div {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sc-space-2);
+  font-size: var(--sc-fs-label);
+}
+.sc-fuel-detour-result dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.sc-fuel-detour-result p {
+  color: var(--sc-text-2);
+  font-size: var(--sc-fs-label);
+}
+
 /* First-use car setup: vehicle type chips, then consumption and fuel price side by side. */
 .sc-vehicle-kinds {
   display: flex;

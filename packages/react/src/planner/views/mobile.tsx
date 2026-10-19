@@ -23,6 +23,7 @@ import {
   fuelPriceFor,
 } from '@smart-commute/providers';
 import { type MessageKey } from '@smart-commute/i18n';
+import { FuelDetourCalculator } from '../../FuelDetourCalculator';
 import { WeatherBar } from '../../WeatherBar';
 import { ModeIcon, NumberField } from '../fields';
 import { type MobilePage } from '../types';
@@ -796,6 +797,8 @@ export const renderPageContent = (m: PlannerModel, page: MobilePage) => {
   switch (page) {
     case 'route':
       return renderRoutePage(m);
+    case 'fuelDetour':
+      return <FuelDetourCalculator settings={m.state.settings} t={t} money={m.money} />;
     case 'costs':
       return (
         <div className="sc-input-panel">
@@ -947,7 +950,7 @@ export const renderPage = (m: PlannerModel, page: MobilePage, index: number) => 
   const covered = index < pages.length - 1 || pickingActive;
   const titleId = `${plannerId}-page-${page}`;
   // Reading pages carry their own heading; the bar title then only names the page.
-  const Title = page === 'route' || page === 'costs' ? 'h1' : 'p';
+  const Title = page === 'route' || page === 'costs' || page === 'fuelDetour' ? 'h1' : 'p';
   const searching = page === 'route' && searchField;
   return (
     <section
@@ -1015,6 +1018,7 @@ export const renderOpeningCard = (m: PlannerModel) => {
     followsAverageFuel,
     locale,
     money,
+    openPage,
     plannerId,
     setNotice,
     state,
@@ -1055,6 +1059,11 @@ export const renderOpeningCard = (m: PlannerModel) => {
           </div>
         ))}
       </dl>
+      {state.settings.vehicleKind !== 'electric' && (
+        <button className="sc-small-button sc-full-width" onClick={() => openPage('fuelDetour')}>
+          {t('fuelDetourOpen')}
+        </button>
+      )}
       <p className="sc-opening-note">
         {t('openingTransitFrom', {
           fare: money(AT_FARE_RULES.adult[0]),

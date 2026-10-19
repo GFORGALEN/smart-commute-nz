@@ -28,7 +28,7 @@ export interface SmartCommutePlannerProps {
 
 export type Screen = 'planner' | 'comparison' | 'breakdown' | 'settings' | 'about';
 /** Full-screen pages that open over the phone map; the map itself stays mounted underneath. */
-export type MobilePage = 'route' | 'costs' | Exclude<Screen, 'planner'>;
+export type MobilePage = 'route' | 'costs' | 'fuelDetour' | Exclude<Screen, 'planner'>;
 export type Direction = 'outbound' | 'inbound';
 export type Translator = ReturnType<typeof createTranslator>;
 export interface PlannerState {

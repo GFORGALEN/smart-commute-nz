@@ -2120,7 +2120,7 @@ describe('phone map-first layout', () => {
     expect(card).toHaveTextContent('Bus and train from $3.00 · AT HOP 7-day cap $50');
     // A new rider follows the average, so there is nothing to apply.
     expect(card).toHaveTextContent('used for driving costs');
-    expect(within(card).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /average/ })).not.toBeInTheDocument();
   });
 
   it('keeps a typed fuel price, and offers the weekly average to go back to', async () => {
@@ -2141,10 +2141,35 @@ describe('phone map-first layout', () => {
     const card = screen.getByRole('region', { name: 'Fuel this week' });
     fireEvent.click(within(card).getByRole('button', { name: 'Use the average, $3.50/L' }));
     expect(await screen.findByText('Driving costs now use $3.50/L')).toBeVisible();
-    expect(within(card).queryByRole('button')).not.toBeInTheDocument();
+    expect(within(card).queryByRole('button', { name: /average/ })).not.toBeInTheDocument();
     expect(
       JSON.parse(localStorage.getItem('smart-commute-nz:v1')!) as { fuelPriceChosen: boolean },
     ).toMatchObject({ fuelPriceChosen: false, settings: { fuelPrice: 3.5 } });
+  });
+
+  it('works out from the fuel card whether a cheaper station is worth the drive', async () => {
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Is the cheaper station worth the drive?' }),
+    );
+    const page = screen.getByRole('dialog', { name: 'Worth the drive for cheaper fuel?' });
+    // The nearby price and fuel use start from the rider's settings.
+    expect(within(page).getByLabelText('Price nearby')).toHaveValue('3.5');
+    expect(within(page).getByLabelText('Fuel consumption (L/100km)')).toHaveValue('8.2');
+    fireEvent.change(within(page).getByLabelText('Price at the cheaper station'), {
+      target: { value: '325.9' },
+    });
+    fireEvent.change(within(page).getByLabelText('Extra km there and back'), {
+      target: { value: '10' },
+    });
+    // 40 L × 24.1c = $9.64 saved; 0.82 L at $3.259 and 80c of wear cost $3.47.
+    expect(within(page).getByRole('status')).toHaveTextContent('Worth it: you save $6.17');
+    fireEvent.change(within(page).getByLabelText('Litres you will put in'), {
+      target: { value: '12' },
+    });
+    expect(within(page).getByRole('status')).toHaveTextContent('Not worth it: it costs $0.58 more');
   });
 
   it('switches language from the map in one tap', () => {

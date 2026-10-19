@@ -1731,7 +1731,11 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     setPages([screen]);
   }
   if (!isMobile && pages.length) {
-    const reading = pages.filter((page) => page !== 'route' && page !== 'costs');
+    // Pages with a wide-screen tab carry over; the phone-only fuel calculator closes.
+    const reading = pages.filter(
+      (page): page is Exclude<MobilePage, 'route' | 'costs' | 'fuelDetour'> =>
+        page !== 'route' && page !== 'costs' && page !== 'fuelDetour',
+    );
     setPages([]);
     if (reading.length) setScreen(reading[reading.length - 1]!);
   }
@@ -2055,6 +2059,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
   const pageTitles: Record<MobilePage, MessageKey> = {
     route: 'mobileEditRoute',
     costs: 'adjustCosts',
+    fuelDetour: 'fuelDetourTitle',
     comparison: 'comparison',
     breakdown: 'breakdown',
     settings: 'settings',
