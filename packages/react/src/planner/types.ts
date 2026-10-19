@@ -61,6 +61,8 @@ export interface PlannerState {
    * national average for the car's fuel; the offline example keeps its fixed values.
    */
   fuelPriceChosen?: boolean;
+  /** True once the rider has set up (or skipped) their car on first use. */
+  vehicleSetUp?: boolean;
 }
 export type RoutePriority = 'cost' | 'time';
 export type LiveMode = 'drive' | 'transit';

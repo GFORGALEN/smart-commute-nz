@@ -660,6 +660,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
       ...(patch.fuelPrice !== undefined ? { fuelPriceChosen: true } : {}),
     }));
   const followsAverageFuel = Boolean(props.googleApiKey) && !state.fuelPriceChosen;
+  const finishVehicleSetup = () => setState((current) => ({ ...current, vehicleSetUp: true }));
   /** Goes back to MBIE's weekly average for the car's fuel, and keeps following it. */
   const applyAverageFuelPrice = () =>
     setState((current) => {
@@ -2094,6 +2095,7 @@ export function usePlannerModel(props: SmartCommutePlannerProps) {
     placeSuggestions,
     searchPlaces,
     followsAverageFuel,
+    finishVehicleSetup,
     applyAverageFuelPrice,
     googleMapsUrl,
     setPriority,

@@ -579,7 +579,7 @@ export const renderOptionEditor = (m: PlannerModel, option: JourneyOption, showT
   );
 };
 
-const vehicleLabels: Record<VehicleKind, MessageKey> = {
+export const vehicleLabels: Record<VehicleKind, MessageKey> = {
   petrol: 'vehiclePetrol',
   diesel: 'vehicleDiesel',
   hybrid: 'vehicleHybrid',

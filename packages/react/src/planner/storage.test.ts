@@ -49,3 +49,22 @@ describe('fuel price for a rider', () => {
     });
   });
 });
+
+describe('first-use car setup', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('asks a new rider, and anyone whose car is still the petrol example', () => {
+    expect(initialState(live).vehicleSetUp).toBe(false);
+    save({ fuelPrice: 3.5 });
+    expect(initialState(live).vehicleSetUp).toBe(false);
+  });
+
+  it('does not ask again once done, or for a car already changed before this card existed', () => {
+    save({}, { vehicleSetUp: true });
+    expect(initialState(live).vehicleSetUp).toBe(true);
+    save({ vehicleKind: 'hybrid', fuelConsumption: 4.5 });
+    expect(initialState(live).vehicleSetUp).toBe(true);
+    save({ fuelConsumption: 6.1 });
+    expect(initialState(live).vehicleSetUp).toBe(true);
+  });
+});

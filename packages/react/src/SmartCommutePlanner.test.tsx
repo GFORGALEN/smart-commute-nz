@@ -2090,9 +2090,31 @@ describe('phone map-first layout', () => {
     expect(link).toHaveAttribute('target', '_blank');
   });
 
+  it('asks a first-time rider for their car, applying each choice, and then shows fuel prices', async () => {
+    render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
+    await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    const setup = screen.getByRole('region', { name: 'Your car' });
+    fireEvent.click(within(setup).getByRole('button', { name: 'Diesel' }));
+    // The diesel preset consumption and the diesel average price arrive with the choice.
+    expect(within(setup).getByLabelText('Fuel consumption (L/100km)')).toHaveValue(7);
+    expect(within(setup).getByLabelText('Fuel price (NZ$/L)')).toHaveValue(3.2);
+    fireEvent.change(within(setup).getByLabelText('Fuel consumption (L/100km)'), {
+      target: { value: '6.4' },
+    });
+    fireEvent.click(within(setup).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('region', { name: 'Your car' })).not.toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Fuel this week' })).toBeVisible();
+    expect(JSON.parse(localStorage.getItem('smart-commute-nz:v1')!)).toMatchObject({
+      vehicleSetUp: true,
+      fuelPriceChosen: false,
+      settings: { vehicleKind: 'diesel', fuelConsumption: 6.4, fuelPrice: 3.2 },
+    });
+  });
+
   it("opens on this week's fuel prices, which price driving until a rider types their own", async () => {
     render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);
     await waitFor(() => expect(google.initializeMap).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
     const card = screen.getByRole('region', { name: 'Fuel this week' });
     expect(card).toHaveTextContent('91 petrol$3.50/L');
     expect(card).toHaveTextContent('Bus and train from $3.00 · AT HOP 7-day cap $50');
@@ -2111,6 +2133,7 @@ describe('phone map-first layout', () => {
         options: createExampleOptions(),
         timesVersion: 2,
         fuelPriceChosen: true,
+        vehicleSetUp: true,
       }),
     );
     render(<SmartCommutePlanner destination="" googleApiKey="restricted-test-key" />);

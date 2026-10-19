@@ -2837,6 +2837,35 @@ label.sc-route-measurements {
   font-weight: 650;
 }
 
+/* First-use car setup: vehicle type chips, then consumption and fuel price side by side. */
+.sc-vehicle-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sc-space-2);
+}
+.sc-vehicle-kinds button {
+  min-height: 40px;
+  padding: 0 var(--sc-space-3);
+  border: 1px solid var(--sc-line-strong);
+  border-radius: 999px;
+  background: var(--sc-surface);
+  color: var(--sc-text);
+  font-weight: 600;
+}
+.sc-vehicle-kinds button[aria-pressed='true'] {
+  border-color: var(--sc-accent);
+  background: var(--sc-accent);
+  color: var(--sc-on-accent);
+}
+.sc-vehicle-numbers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sc-space-2);
+}
+.sc-vehicle-setup .sc-primary-button {
+  min-height: 48px;
+}
+
 /* Cost sheet: collapsed shows the selected cost; open adds options and next steps. */
 .sc-sheet {
   position: relative;

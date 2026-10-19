@@ -15,7 +15,7 @@ import {
   Settings as SettingsIcon,
   X,
 } from 'lucide-react';
-import { type RouteResult } from '@smart-commute/core';
+import { type RouteResult, type VehicleKind } from '@smart-commute/core';
 import {
   AT_FARE_RULES,
   NZ_FUEL_PRICES,
@@ -24,7 +24,7 @@ import {
 } from '@smart-commute/providers';
 import { type MessageKey } from '@smart-commute/i18n';
 import { WeatherBar } from '../../WeatherBar';
-import { ModeIcon } from '../fields';
+import { ModeIcon, NumberField } from '../fields';
 import { type MobilePage } from '../types';
 import { type PlannerModel } from '../usePlannerModel';
 import {
@@ -36,6 +36,7 @@ import {
   renderStopovers,
   renderTimeFields,
 } from './journeyInputs';
+import { vehicleLabels } from './routeEditor';
 import {
   renderBreakdown,
   renderComparison,
@@ -1084,6 +1085,65 @@ export const renderOpeningCard = (m: PlannerModel) => {
   );
 };
 
+// First use asks for the car, since driving costs rest on its type and consumption. Each choice
+// applies at once; Done or Skip only closes the card. Everything stays on this device.
+export const renderVehicleSetup = (m: PlannerModel) => {
+  const { chooseVehicle, finishVehicleSetup, plannerId, state, t, updateSettings } = m;
+  const { settings } = state;
+  const kind = settings.vehicleKind ?? 'petrol';
+  const titleId = `${plannerId}-vehicle-setup`;
+  return (
+    <section className="sc-opening sc-vehicle-setup" aria-labelledby={titleId}>
+      <div className="sc-opening-head">
+        <h2 id={titleId}>{t('vehicleSetupTitle')}</h2>
+        <button className="sc-text-button" onClick={finishVehicleSetup}>
+          {t('vehicleSetupSkip')}
+        </button>
+      </div>
+      <p className="sc-opening-note">{t('vehicleSetupHelp')}</p>
+      <div className="sc-vehicle-kinds" role="group" aria-label={t('vehicleKind')}>
+        {(Object.keys(vehicleLabels) as VehicleKind[]).map((option) => (
+          <button key={option} aria-pressed={kind === option} onClick={() => chooseVehicle(option)}>
+            {t(vehicleLabels[option])}
+          </button>
+        ))}
+      </div>
+      <div className="sc-vehicle-numbers">
+        {kind === 'electric' ? (
+          <NumberField
+            label={t('electricityConsumption')}
+            value={settings.electricityConsumption ?? 17}
+            onChange={(electricityConsumption) => updateSettings({ electricityConsumption })}
+            t={t}
+          />
+        ) : (
+          <>
+            <NumberField
+              label={t(kind === 'plug-in-hybrid' ? 'fuelConsumptionOnFuel' : 'fuelConsumption')}
+              value={settings.fuelConsumption}
+              onChange={(fuelConsumption) => updateSettings({ fuelConsumption })}
+              t={t}
+            />
+            <NumberField
+              label={t('fuelPrice')}
+              value={settings.fuelPrice}
+              onChange={(fuelPrice) => updateSettings({ fuelPrice })}
+              t={t}
+              step="0.01"
+            />
+          </>
+        )}
+      </div>
+      {kind !== 'electric' && !state.fuelPriceChosen && (
+        <p className="sc-help">{t('vehicleSetupFuelHint')}</p>
+      )}
+      <button className="sc-primary-button sc-full-width" onClick={finishVehicleSetup}>
+        {t('vehicleSetupDone')}
+      </button>
+    </section>
+  );
+};
+
 export const renderMobileShell = (m: PlannerModel) => {
   const {
     googleMode,
@@ -1093,6 +1153,7 @@ export const renderMobileShell = (m: PlannerModel) => {
     pickingActive,
     routeEditing,
     sheetNotices,
+    state,
   } = m;
   const pageShown = pages.length > 0 && !pickingActive;
   return (
@@ -1104,7 +1165,11 @@ export const renderMobileShell = (m: PlannerModel) => {
           {!pickingActive && !routeEditing && renderLocateButton(m)}
         </div>
         {!routeEditing &&
-          (!googleMode || hasDestination || sheetNotices ? renderSheet(m) : renderOpeningCard(m))}
+          (!googleMode || hasDestination || sheetNotices
+            ? renderSheet(m)
+            : state.vehicleSetUp
+              ? renderOpeningCard(m)
+              : renderVehicleSetup(m))}
       </div>
       {pages.length > 0 && (
         <div className="sc-page-stack" ref={pageStackRef}>

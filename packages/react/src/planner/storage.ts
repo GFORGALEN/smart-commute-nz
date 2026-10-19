@@ -125,6 +125,7 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
     ownership: { ...DEFAULT_OWNERSHIP },
     applyFareCap: true,
     fuelPriceChosen: false,
+    vehicleSetUp: false,
   };
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -185,6 +186,12 @@ export function initialState(props: SmartCommutePlannerProps): PlannerState {
       applyFareCap: typeof saved.applyFareCap === 'boolean' ? saved.applyFareCap : true,
       priority: saved.priority === 'time' ? 'time' : 'cost',
       fuelPriceChosen,
+      // A car already moved off the petrol example counts as set up.
+      vehicleSetUp:
+        typeof saved.vehicleSetUp === 'boolean'
+          ? saved.vehicleSetUp
+          : (kind ?? 'petrol') !== 'petrol' ||
+            saved.settings.fuelConsumption !== VEHICLE_PRESETS.petrol.fuelConsumption,
     };
   } catch {
     return fallback;
