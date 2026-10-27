@@ -464,6 +464,8 @@ const en = {
     'Each outbound alternative is paired with one return route; return alternatives are not combined.',
   providerNoteFallback:
     'Google used fallback routing, so these estimates may differ from the request.',
+  providerNoteUnpricedLeftOut:
+    'Some Google routes could not be priced, such as a coach outside AT fares, so they are not shown.',
   googleErrorMissingKey: 'Google Maps is not set up on this site. Continue with manual inputs.',
   googleErrorInvalidInput:
     'Google could not use these places or times. Check both addresses and choose future departure and return times, then plan again.',
@@ -1043,6 +1045,7 @@ const zh: Record<keyof typeof en, string> = {
   providerNoteTrafficUnaware: '为控制 API 费用，驾车时间未计路况，出发和回程时间不影响结果。',
   providerNotePairedReturn: '每个去程备选只搭配一条回程路线，回程备选不做组合。',
   providerNoteFallback: 'Google 使用了备用路线计算，结果可能与请求条件不同。',
+  providerNoteUnpricedLeftOut: '部分 Google 路线无法计价（例如 AT 票价之外的长途大巴），未列出。',
   googleErrorMissingKey: '本站尚未配置 Google 地图，请继续使用手动输入。',
   googleErrorInvalidInput:
     'Google 无法使用这些地点或时间。请检查两个地址，并选择未来的去程和回程时间，然后重新规划。',

@@ -1378,6 +1378,30 @@ export class GoogleRouteProvider implements RouteProvider {
     return legs;
   }
 
+  /**
+   * The routes whose legs Google returned completely. One alternative that cannot be priced,
+   * such as an InterCity coach with no Google fare, is left out rather than failing the rest.
+   */
+  private usableRoutes(
+    routes: GoogleRouteData[],
+    mode: 'drive' | 'transit',
+    departureTime?: Date,
+  ): { route: GoogleRouteData; legs: TravelLeg[] }[] {
+    let firstError: RouteProviderError | undefined;
+    const usable = routes.flatMap((route) => {
+      try {
+        return [{ route, legs: this.toLegs(route, mode, departureTime) }];
+      } catch (error) {
+        if (!(error instanceof RouteProviderError) || error.code !== 'INCOMPLETE_RESULT')
+          throw error;
+        firstError ??= error;
+        return [];
+      }
+    });
+    if (!usable.length && firstError) throw firstError;
+    return usable;
+  }
+
   async getRoutes(request: RouteRequest): Promise<RouteResult> {
     if (this.busy) throw new RouteProviderError('BUSY', 'A route request is already running.');
     this.busy = true;
@@ -1500,6 +1524,14 @@ export class GoogleRouteProvider implements RouteProvider {
         }
       }
       warnings.push(...this.computationWarnings);
+      const usableOutbound = this.usableRoutes(outbound, request.mode, request.departureTime);
+      if (usableOutbound.length < outbound.length)
+        warnings.push(
+          'Google also suggested routes it could not price, such as a coach outside AT fares; they are left out.',
+        );
+      const usableInbound = this.usableRoutes(inbound, request.mode, request.returnTime)[0];
+      const inboundRoute = usableInbound?.route;
+      const inboundLegs = usableInbound?.legs ?? [];
       // Responses are kept by request; the map is left as it is until a route is drawn.
       const response = `response-${this.metrics.routeRequests}`;
       this.responseOrder.push(response);
@@ -1509,17 +1541,12 @@ export class GoogleRouteProvider implements RouteProvider {
             this.routeResponse.delete(routeId);
             this.sdkRoutes.delete(routeId);
           }
-      const routes = outbound.map((route, index): JourneyOption => {
+      const routes = usableOutbound.map(({ route, legs: outboundLegs }, index): JourneyOption => {
         const id = `google-${request.mode}-${this.metrics.routeRequests}-${index}`;
         this.sdkRoutes.set(id, route);
         this.routeResponse.set(id, response);
         warnings.push(...(route.warnings ?? []));
-        const inboundRoute = inbound[0];
         if (inboundRoute) warnings.push(...(inboundRoute.warnings ?? []));
-        const outboundLegs = this.toLegs(route, request.mode, request.departureTime);
-        const inboundLegs = inboundRoute
-          ? this.toLegs(inboundRoute, request.mode, request.returnTime)
-          : [];
         return {
           id,
           name: route.description ?? `Google ${request.mode} route ${index + 1}`,
@@ -1532,7 +1559,11 @@ export class GoogleRouteProvider implements RouteProvider {
           ...(inboundRoute ? { returnBasis: 'routed' as const } : {}),
         };
       });
-      const agencies = [...outbound, ...inbound].flatMap(
+      const shown = [
+        ...usableOutbound.map(({ route }) => route),
+        ...(inboundRoute ? [inboundRoute] : []),
+      ];
+      const agencies = shown.flatMap(
         (route) =>
           route.legs?.flatMap(
             (leg) =>

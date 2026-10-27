@@ -59,4 +59,5 @@ export const providerNoteKeys: [string, MessageKey][] = [
   ['This request uses traffic-unaware driving', 'providerNoteTrafficUnaware'],
   ['Outbound alternatives are paired', 'providerNotePairedReturn'],
   ['Google used fallback routing', 'providerNoteFallback'],
+  ['Google also suggested routes it could not price', 'providerNoteUnpricedLeftOut'],
 ];

@@ -744,6 +744,28 @@ describe('Google adapter without external paid requests', () => {
       });
     },
   );
+  it('leaves out an unpriced coach alternative instead of failing the AT routes beside it', async () => {
+    // Flat Bush to Albany: Google's first route rides an InterCity coach and quotes no fare.
+    const coach = atStep({
+      transitLine: {
+        name: 'Auckland - Central - Tauranga',
+        vehicle: { vehicleType: 'BUS' },
+        agencies: [{ name: 'InterCity', url: 'http://www.intercity.co.nz/' }],
+      },
+    });
+    const { provider } = mockGoogle(
+      [[transitRoute([atStep(), coach, atStep()]), transitRoute([atStep(), atStep()])]],
+      { estimateMissingTransitFare: true },
+    );
+    const result = await provider.getRoutes({ ...request, mode: 'transit' });
+    expect(result.routes).toHaveLength(1);
+    expect(result.routes[0]!.outbound.filter((leg) => leg.mode === 'bus')).toHaveLength(2);
+    expect(result.routes[0]!.outbound[0]!.fareSource).toBe('at-estimate');
+    expect(result.warnings).toContainEqual(
+      expect.stringContaining('Google also suggested routes it could not price'),
+    );
+    expect(result.attribution).not.toContain('InterCity');
+  });
   it('prices an AT journey by the zones its path crosses on the AT zone map', async () => {
     // Henderson to Britomart by train: Waitākere, Isthmus and City, as AT's own example says.
     const western = {
