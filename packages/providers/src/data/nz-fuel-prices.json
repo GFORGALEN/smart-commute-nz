@@ -2,21 +2,21 @@
   "source": "MBIE weekly fuel price monitoring",
   "url": "https://www.mbie.govt.nz/building-and-energy/energy-and-natural-resources/energy-statistics-and-modelling/energy-statistics/weekly-fuel-price-monitoring",
   "license": "CC BY 4.0",
-  "weekEnding": "2026-11-06",
+  "weekEnding": "2026-11-13",
   "status": "Provisional",
   "unit": "NZD per litre",
   "prices": {
     "regular": {
-      "retail": 3.48,
-      "board": 3.52
+      "retail": 3.37,
+      "board": 3.41
     },
     "premium": {
-      "retail": 3.65,
-      "board": 3.72
+      "retail": 3.54,
+      "board": 3.61
     },
     "diesel": {
-      "retail": 3.16,
-      "board": 3.19
+      "retail": 3.06,
+      "board": 3.09
     }
   }
 }
